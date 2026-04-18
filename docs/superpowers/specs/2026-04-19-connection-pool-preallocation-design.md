@@ -1,89 +1,92 @@
-# Connection Pool Preallocation Design
+# 连接池预分配设计
 
-**Date**: 2026-04-19
-**Project**: Chase (HTTP Server Library)
-**Module**: connection pool optimization
-**Version**: 1.0
-
----
-
-## Overview
-
-Optimize connection object allocation by preallocating a pool of Connection structures in each Worker thread, reducing malloc overhead during accept, minimizing memory fragmentation, and improving memory usage predictability.
+**日期**: 2026-04-19
+**项目**: Chase (HTTP Server Library)
+**模块**: connection pool optimization (连接池优化)
+**版本**: 1.0
 
 ---
 
-## Design Goals
+## 概述
 
-1. **Reduce allocation latency**: Avoid malloc overhead during accept
-2. **Reduce memory fragmentation**: Preallocate large memory block
-3. **Predictable memory usage**: Fixed base capacity + monitored dynamic expansion
-
----
-
-## Core Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| base_capacity | max_connections / worker_count | Per-worker base pool capacity |
-| expand_threshold | 10% | Trigger temp malloc when free_count < 10% of base |
-| lazy_release_delay | 60s | Free temp connections after 60s idle |
+在每个 Worker 线程启动时预分配 Connection 结构池，优化连接对象分配：
+- 减少 accept 时 malloc 开销
+- 减少内存碎片
+- 提高内存占用可预测性
 
 ---
 
-## Data Structures
+## 设计目标
+
+1. **减少分配延迟**：避免 accept 时 malloc 开销
+2. **减少内存碎片**：预分配大块连续内存
+3. **内存占用可预测**：固定基础容量 + 监控的动态扩容
+
+---
+
+## 核心参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| base_capacity | max_connections / worker_count | 每个 Worker 基础连接池容量 |
+| expand_threshold | 10% | free_count < 10% 时触发临时 malloc |
+| lazy_release_delay | 60s | 临时 malloc 的连接空闲 60 秒后释放 |
+
+---
+
+## 数据结构
 
 ```c
 typedef struct ConnectionPool {
-    // Preallocated array (fixed memory block)
+    // 预分配数组（固定内存块）
     Connection* preallocated;      // malloc(base_capacity * sizeof(Connection))
     int base_capacity;
     
-    // Free list (linked list)
+    // 空闲链表
     Connection* free_list_head;
     Connection* free_list_tail;
     int free_count;
     
-    // Active list (linked list)
+    // 活跃链表
     Connection* active_list_head;
     int active_count;
     
-    // Lazy release queue
+    // 惰性释放队列
     Connection* lazy_release_queue;
     int lazy_release_count;
     
-    // Statistics
-    int total_allocated;           // Total including temp malloc
-    int temp_allocated;            // Temp malloc count only
+    // 统计信息
+    int total_allocated;           // 总分配数（含临时 malloc）
+    int temp_allocated;            // 仅临时 malloc 数量
 } ConnectionPool;
 
-// Connection structure extension
+// Connection 结构扩展
 struct Connection {
-    // ... existing fields ...
+    // ... 现有字段 ...
     
-    // Pool management (internal)
-    Connection* next;              // Linked list next pointer
-    Connection* prev;              // Linked list prev pointer
-    uint64_t release_time;         // For lazy release tracking
-    int is_temp_allocated;         // Flag: 0 = preallocated, 1 = temp malloc
+    // 池管理（内部使用）
+    Connection* next;              // 链表下一个指针
+    Connection* prev;              // 链表上一个指针
+    uint64_t release_time;         // 惰性释放时间记录
+    int is_temp_allocated;         // 标记：0 = 预分配, 1 = 临时 malloc
 };
 ```
 
 ---
 
-## Lifecycle Flow
+## 生命周期流程
 
-### 1. Worker Startup (Preallocation)
+### 1. Worker 启动时（预分配）
 
 ```c
 ConnectionPool* connection_pool_create(int base_capacity) {
     ConnectionPool* pool = malloc(sizeof(ConnectionPool));
     
-    // 1. Allocate fixed memory block
+    // 1. 分配固定内存块
     pool->preallocated = malloc(base_capacity * sizeof(Connection));
     pool->base_capacity = base_capacity;
     
-    // 2. Initialize each Connection
+    // 2. 初始化每个 Connection
     for (int i = 0; i < base_capacity; i++) {
         Connection* conn = &pool->preallocated[i];
         conn->fd = -1;
@@ -93,7 +96,7 @@ ConnectionPool* connection_pool_create(int base_capacity) {
         conn->prev = NULL;
     }
     
-    // 3. Add all to free_list
+    // 3. 全部加入空闲链表
     pool->free_list_head = &pool->preallocated[0];
     pool->free_list_tail = &pool->preallocated[base_capacity - 1];
     
@@ -110,15 +113,15 @@ ConnectionPool* connection_pool_create(int base_capacity) {
 }
 ```
 
-### 2. Accept New Connection (Get from Pool)
+### 2. Accept 新连接时（从池获取）
 
 ```c
 Connection* connection_pool_get(ConnectionPool* pool) {
     Connection* conn;
     
-    // 1. Check if should expand (threshold-based)
+    // 1. 检查是否需要扩容（阈值触发）
     if (should_expand(pool)) {
-        // Trigger temp malloc
+        // 触发临时 malloc
         conn = malloc(sizeof(Connection));
         conn->is_temp_allocated = 1;
         conn->fd = -1;
@@ -126,7 +129,7 @@ Connection* connection_pool_get(ConnectionPool* pool) {
         pool->temp_allocated++;
         pool->total_allocated++;
         
-        // Add to active_list
+        // 加入活跃链表
         conn->next = pool->active_list_head;
         conn->prev = NULL;
         if (pool->active_list_head) {
@@ -138,7 +141,7 @@ Connection* connection_pool_get(ConnectionPool* pool) {
         return conn;
     }
     
-    // 2. Get from free_list (O(1))
+    // 2. 从空闲链表获取（O(1)）
     conn = pool->free_list_head;
     pool->free_list_head = conn->next;
     if (pool->free_list_head) {
@@ -148,7 +151,7 @@ Connection* connection_pool_get(ConnectionPool* pool) {
     }
     pool->free_count--;
     
-    // 3. Add to active_list
+    // 3. 加入活跃链表
     conn->next = pool->active_list_head;
     conn->prev = NULL;
     if (pool->active_list_head) {
@@ -160,17 +163,17 @@ Connection* connection_pool_get(ConnectionPool* pool) {
     return conn;
 }
 
-// Threshold check
+// 阈值检查
 int should_expand(ConnectionPool* pool) {
     return pool->free_count < pool->base_capacity * 0.1;
 }
 ```
 
-### 3. Connection Close (Release to Pool)
+### 3. 连接关闭时（释放到池）
 
 ```c
 void connection_pool_release(ConnectionPool* pool, Connection* conn) {
-    // 1. Remove from active_list
+    // 1. 从活跃链表移除
     if (conn->prev) {
         conn->prev->next = conn->next;
     } else {
@@ -181,13 +184,13 @@ void connection_pool_release(ConnectionPool* pool, Connection* conn) {
     }
     pool->active_count--;
     
-    // 2. Reset Connection state
+    // 2. 重置 Connection 状态
     conn->fd = -1;
     conn->state = CONN_STATE_CLOSED;
     
-    // 3. Route based on allocation type
+    // 3. 根据分配类型路由
     if (conn->is_temp_allocated == 0) {
-        // Preallocated: add to free_list
+        // 预分配：加入空闲链表
         conn->next = pool->free_list_head;
         conn->prev = NULL;
         if (pool->free_list_head) {
@@ -196,7 +199,7 @@ void connection_pool_release(ConnectionPool* pool, Connection* conn) {
         pool->free_list_head = conn;
         pool->free_count++;
     } else {
-        // Temp malloc: add to lazy_release_queue
+        // 临时 malloc：加入惰性释放队列
         conn->release_time = get_current_ms();
         conn->next = pool->lazy_release_queue;
         conn->prev = NULL;
@@ -209,19 +212,19 @@ void connection_pool_release(ConnectionPool* pool, Connection* conn) {
 }
 ```
 
-### 4. Lazy Release Timer (Periodic Check)
+### 4. 惰性释放定时器（定期检查）
 
 ```c
 void connection_pool_lazy_release_check(ConnectionPool* pool) {
-    // Called by Worker EventLoop timer (every 10s)
+    // 由 Worker EventLoop 定时器调用（每 10 秒）
     uint64_t now = get_current_ms();
     Connection* conn = pool->lazy_release_queue;
     
     while (conn) {
         Connection* next = conn->next;
         
-        if (now - conn->release_time > 60000) {  // 60 seconds
-            // Remove from lazy_release_queue
+        if (now - conn->release_time > 60000) {  // 60 秒
+            // 从惰性释放队列移除
             if (conn->prev) {
                 conn->prev->next = conn->next;
             } else {
@@ -231,7 +234,7 @@ void connection_pool_lazy_release_check(ConnectionPool* pool) {
                 conn->next->prev = conn->prev;
             }
             
-            // Free memory
+            // 释放内存
             free(conn);
             pool->temp_allocated--;
             pool->total_allocated--;
@@ -245,36 +248,36 @@ void connection_pool_lazy_release_check(ConnectionPool* pool) {
 
 ---
 
-## Configuration Extension
+## 配置扩展
 
 ```c
 struct HttpConfig {
-    // ... existing fields ...
+    // ... 现有字段 ...
     
-    // Connection pool configuration (optional override)
-    int connection_pool_size_per_worker;  // 0 = auto calculate
-    float connection_pool_expand_threshold; // Default 0.1 (10%)
-    int connection_pool_lazy_release_delay_ms; // Default 60000
+    // 连接池配置（可选覆盖）
+    int connection_pool_size_per_worker;  // 0 = 自动计算
+    float connection_pool_expand_threshold; // 默认 0.1 (10%)
+    int connection_pool_lazy_release_delay_ms; // 默认 60000
 };
 ```
 
-**Auto calculation formula**:
+**自动计算公式**：
 
 ```c
 int calculate_base_capacity(HttpConfig* cfg, int worker_count) {
     if (cfg->connection_pool_size_per_worker > 0) {
-        return cfg->connection_pool_size_per_worker;  // User override
+        return cfg->connection_pool_size_per_worker;  // 用户覆盖
     }
-    return cfg->max_connections / worker_count;  // Auto
+    return cfg->max_connections / worker_count;  // 自动计算
 }
 ```
 
 ---
 
-## Monitoring Interface
+## 监控接口
 
 ```c
-// Get pool statistics
+// 获取池统计信息
 typedef struct PoolStats {
     int base_capacity;
     int free_count;
@@ -286,71 +289,71 @@ typedef struct PoolStats {
 
 PoolStats connection_pool_get_stats(ConnectionPool* pool);
 
-// Example monitoring output:
+// 示例监控输出：
 // Worker-0 pool: free=2400, active=100, temp=0, lazy=0, utilization=4.0%
 // Worker-1 pool: free=2450, active=50, temp=5, lazy=3, utilization=2.0%
 ```
 
 ---
 
-## Testing Criteria
+## 测试验收标准
 
-| Test | Acceptance Criteria |
-|------|---------------------|
-| Preallocation correct | After Worker startup: free_count == base_capacity |
-| Get/Release correct | 1000 accept/close cycles: free_count restored to initial |
-| Threshold triggered | free_count < 10% causes temp_allocated to increase |
-| Lazy release effective | Temp connections idle 60s: temp_allocated decreases |
-| Performance improvement | Accept latency vs malloc version: > 50% reduction |
-
----
-
-## Integration Points
-
-1. **Phase 1**: Add ConnectionPool struct and pool management fields to Connection
-2. **Phase 2**: WorkerThread startup calls connection_pool_create()
-3. **Phase 2**: Worker add_connection uses connection_pool_get()
-4. **Phase 2**: Connection close calls connection_pool_release()
-5. **Phase 2**: Worker EventLoop adds lazy_release_check timer (10s interval)
+| 测试项 | 验收标准 |
+|--------|----------|
+| 预分配正确 | Worker 启动后 free_count == base_capacity |
+| 获取/释放正确 | 1000 次 accept/close 循环，free_count 恢复初始值 |
+| 阈值触发扩容 | free_count < 10% 时 temp_allocated 增加 |
+| 惰性释放生效 | 临时连接空闲 60 秒后 temp_allocated 减少 |
+| 性能提升 | accept 延迟对比 malloc 版本降低 > 50% |
 
 ---
 
-## Memory Overhead Analysis
+## 集成点
 
-| Item | Size | Calculation |
-|------|------|-------------|
-| Connection struct | ~200 bytes | fd, state, buffers, ssl, timers, pool fields |
-| Preallocated block | base_capacity * 200 | e.g., 2500 * 200 = 500KB per worker |
-| Linked list pointers | 2 pointers per conn | Included in Connection struct |
-| Total per worker | ~500KB + temp | Predictable, stable |
-
-**Comparison with malloc-per-accept**:
-
-| Scenario | malloc-per-accept | Pool preallocation |
-|----------|-------------------|--------------------|
-| 10000 connections peak | 10000 malloc calls | 4 * 2500 prealloc |
-| Memory fragmentation | High | Low (large block) |
-| Accept latency | malloc overhead | O(1) pointer op |
-| Memory predictability | Unpredictable | Fixed base + monitored temp |
+1. **Phase 1**：添加 ConnectionPool 结构和池管理字段到 Connection
+2. **Phase 2**：WorkerThread 启动时调用 connection_pool_create()
+3. **Phase 2**：Worker add_connection 使用 connection_pool_get()
+4. **Phase 2**：Connection close 调用 connection_pool_release()
+5. **Phase 2**：Worker EventLoop 添加 lazy_release_check 定时器（10 秒间隔）
 
 ---
 
-## Risk Analysis
+## 内存开销分析
 
-| Risk | Mitigation |
-|------|------------|
-| Pool exhaustion | Threshold-based early expansion + temp malloc fallback |
-| Memory waste | Auto-calculate base_capacity, lazy release temp connections |
-| Lazy release timer overhead | 10s interval, O(n) scan but n is small (temp_allocated) |
+| 项目 | 大小 | 计算 |
+|------|------|------|
+| Connection 结构 | ~200 字节 | fd, state, buffers, ssl, timers, 池字段 |
+| 预分配块 | base_capacity * 200 | 如 2500 * 200 = 500KB/Worker |
+| 链表指针 | 每个 conn 2 个指针 | 已包含在 Connection 结构中 |
+| 每个 Worker 总计 | ~500KB + temp | 可预测、稳定 |
+
+**对比 malloc-per-accept**：
+
+| 场景 | malloc-per-accept | 池预分配 |
+|------|-------------------|----------|
+| 10000 连接峰值 | 10000 次 malloc | 4 * 2500 预分配 |
+| 内存碎片 | 高 | 低（大块内存） |
+| accept 延迟 | malloc 开销 | O(1) 指针操作 |
+| 内存可预测性 | 不可预测 | 固定基础 + 监控临时 |
 
 ---
 
-## Summary
+## 风险分析
 
-This design provides a simple, efficient connection pool with:
-- O(1) get/release operations
-- Predictable memory usage (fixed base + monitored temp)
-- Threshold-based early expansion (avoids boundary contention)
-- Lazy release for temp connections (memory stable over time)
+| 风险 | 缓解措施 |
+|------|----------|
+| 池耗尽 | 阈值提前扩容 + 临时 malloc 兜底 |
+| 内存浪费 | 自动计算 base_capacity，惰性释放临时连接 |
+| 惰性释放定时器开销 | 10 秒间隔，O(n) 扫描但 n 很小（temp_allocated） |
 
-Implementation is straightforward (~100 lines) and integrates cleanly with existing Worker/Connection architecture.
+---
+
+## 总结
+
+本设计提供简单高效的连接池：
+- O(1) 获取/释放操作
+- 可预测内存占用（固定基础 + 监控临时）
+- 阈值提前扩容（避免边界竞争）
+- 惰性释放临时连接（内存长期稳定）
+
+实现简单（约 100 行代码），与现有 Worker/Connection 架构无缝集成。
