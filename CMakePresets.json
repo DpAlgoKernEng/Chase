@@ -1,0 +1,195 @@
+{
+    "version": 4,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 19,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "cacheVariables": {
+                "CMAKE_EXPORT_COMPILE_COMMANDS": {
+                    "type": "BOOL",
+                    "value": "ON"
+                },
+                "CMAKE_TOOLCHAIN_FILE": {
+                    "type": "FILEPATH",
+                    "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+                },
+                "VCPKG_MANIFEST_MODE": "OFF"
+            }
+        },
+        {
+            "name": "windows-debug",
+            "inherits": "base",
+            "displayName": "Windows Debug",
+            "description": "Windows with MSVC (Debug)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl",
+                "VCPKG_USE_EXTERNAL_I": {
+                    "type": "BOOL",
+                    "value": "OFF"
+                }
+            },
+            "environment": {
+                "VCPKG_ROOT": "E:/thirdlib/vcpkg"
+            }
+        },
+        {
+            "name": "windows-release",
+            "inherits": "base",
+            "displayName": "Windows Release",
+            "description": "Windows with MSVC (Release)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "cl",
+                "CMAKE_CXX_COMPILER": "cl",
+                "VCPKG_USE_EXTERNAL_I": {
+                    "type": "BOOL",
+                    "value": "OFF"
+                }
+            },
+            "environment": {
+                "VCPKG_ROOT": "E:/thirdlib/vcpkg"
+            }
+        },
+        {
+            "name": "linux-debug",
+            "inherits": "base",
+            "displayName": "Linux Debug",
+            "description": "Linux with GCC (Debug)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            },
+            "environment": {
+                "VCPKG_ROOT": "/home/dpalgokerneng/code/vcpkg"
+            }
+        },
+        {
+            "name": "linux-release",
+            "inherits": "base",
+            "displayName": "Linux Release",
+            "description": "Linux with GCC (Release)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "gcc",
+                "CMAKE_CXX_COMPILER": "g++"
+            },
+            "environment": {
+                "VCPKG_ROOT": "/home/dpalgokerneng/code/vcpkg"
+            }
+        },
+        {
+            "name": "macos-debug",
+            "inherits": "base",
+            "displayName": "macOS Debug",
+            "description": "macOS with Clang (Debug)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_C_COMPILER": "/usr/bin/clang",
+                "CMAKE_CXX_COMPILER": "/usr/bin/clang++"
+            },
+            "environment": {
+                "VCPKG_ROOT": "/Users/minghui.liu/code/dpalgokerneng/lib/tools/vcpkg"
+            }
+        },
+        {
+            "name": "macos-release",
+            "inherits": "base",
+            "displayName": "macOS Release",
+            "description": "macOS with Clang (Release)",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_C_COMPILER": "/usr/bin/clang",
+                "CMAKE_CXX_COMPILER": "/usr/bin/clang++"
+            },
+            "environment": {
+                "VCPKG_ROOT": "/Users/minghui.liu/code/dpalgokerneng/lib/tools/vcpkg"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "debug-windows",
+            "configurePreset": "windows-debug",
+            "displayName": "Build Debug (Windows)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release-windows",
+            "configurePreset": "windows-release",
+            "displayName": "Build Release (Windows)",
+            "configuration": "Release"
+        },
+        {
+            "name": "debug-linux",
+            "configurePreset": "linux-debug",
+            "displayName": "Build Debug (Linux)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release-linux",
+            "configurePreset": "linux-release",
+            "displayName": "Build Release (Linux)",
+            "configuration": "Release"
+        },
+        {
+            "name": "debug-macos",
+            "configurePreset": "macos-debug",
+            "displayName": "Build Debug (macOS)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "release-macos",
+            "configurePreset": "macos-release",
+            "displayName": "Build Release (macOS)",
+            "configuration": "Release"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "test-windows-debug",
+            "configurePreset": "windows-debug",
+            "displayName": "Test Debug (Windows)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "test-windows-release",
+            "configurePreset": "windows-release",
+            "displayName": "Test Release (Windows)",
+            "configuration": "Release"
+        },
+        {
+            "name": "test-linux-debug",
+            "configurePreset": "linux-debug",
+            "displayName": "Test Debug (Linux)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "test-linux-release",
+            "configurePreset": "linux-release",
+            "displayName": "Test Release (Linux)",
+            "configuration": "Release"
+        },
+        {
+            "name": "test-macos-debug",
+            "configurePreset": "macos-debug",
+            "displayName": "Test Debug (macOS)",
+            "configuration": "Debug"
+        },
+        {
+            "name": "test-macos-release",
+            "configurePreset": "macos-release",
+            "displayName": "Test Release (macOS)",
+            "configuration": "Release"
+        }
+    ]
+}
