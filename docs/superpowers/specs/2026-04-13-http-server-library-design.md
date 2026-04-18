@@ -2600,20 +2600,20 @@ class GatewayTimeoutException : public HttpException { ... };       // 504
 
 ```
 test/
-├── benchmark/http_server/
+├── benchmark/
 │   ├── throughput_test.c
 │   ├── latency_test.c
 │   ├── connection_pressure_test.c
 │   └── large_file_test.c          # 新增：大文件性能测试
 │
-├── example/http_server/
+├── example/
 │   ├── simple_server.cpp
 │   ├── static_file_demo.cpp
 │   ├── ssl_demo.cpp
 │   ├── async_middleware_demo.cpp  # 新增
 │   └── security_demo.cpp          # 新增
 │
-└── integration/http_server/
+└── integration/
     ├── c_core/
     │   ├── test_eventloop.c
     │   ├── test_timer.c           # 新增：定时器测试
@@ -2775,10 +2775,10 @@ open coverage_report/index.html
 ```
 
 **覆盖率排除规则说明**：
-- test/tests: 测试代码不计入覆盖率
-- example/examples: 示例代码不计入
-- third/_deps: 第三方库不计入
-- 仅统计核心库代码覆盖率
+- test/tests: 测试代码不计入覆盖率（`*/test/*`, `*/tests/*`）
+- examples/example: 示例代码不计入（`*/examples/*`, `*/example/*`）
+- third/_deps: 第三方库不计入（`*/third/*`, `*/_deps/*`）
+- 仅统计核心库代码覆盖率（include/, src/, cpp/）
 
 ---
 

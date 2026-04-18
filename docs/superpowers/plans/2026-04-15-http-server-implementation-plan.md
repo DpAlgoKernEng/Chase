@@ -138,15 +138,14 @@ struct EventLoop {
 
 **文件清单**:
 ```
-library/http_server/
-├── include/eventloop.h    # API 定义（约 50 行）
-├── include/timer.h        # Timer + TimerHeap API（约 40 行）
-├── src/eventloop.c        # 实现（约 300 行）
-└── src/timer.c            # 最小堆实现（约 200 行）
+include/eventloop.h    # API 定义（约 50 行）
+include/timer.h        # Timer + TimerHeap API（约 40 行）
+src/eventloop.c        # 实现（约 300 行）
+src/timer.c            # 最小堆实现（约 200 行）
 
-test/integration/http_server/c_core/
-├── test_eventloop.c       # 单元测试（≥ 10 用例）
-└── test_timer.c           # 单元测试（≥ 5 用例）
+test/integration/c_core/
+├── test_eventloop.c   # 单元测试（≥ 10 用例）
+└── test_timer.c       # 单元测试（≥ 5 用例）
 ```
 
 **验收标准**:
@@ -177,15 +176,14 @@ test/integration/http_server/c_core/
 
 **文件清单**:
 ```
-library/http_server/
-├── include/connection.h   # Connection + Buffer API（约 60 行）
-├── include/http_parser.h  # HTTP 解析 API（约 50 行）
-├── include/error.h        # 错误码定义（约 30 行）
-├── src/connection.c       # 实现（约 400 行）
-├── src/http_parser.c      # 实现（约 500 行）
-└── src/error.c            # 错误处理（约 50 行）
+include/connection.h   # Connection + Buffer API（约 60 行）
+include/http_parser.h  # HTTP 解析 API（约 50 行）
+include/error.h        # 错误码定义（约 30 行）
+src/connection.c       # 实现（约 400 行）
+src/http_parser.c      # 实现（约 500 行）
+src/error.c            # 错误处理（约 50 行）
 
-test/integration/http_server/c_core/
+test/integration/c_core/
 ├── test_connection.c      # 单元测试（≥ 10 用例）
 ├── test_http_parser.c     # 单元测试（≥ 10 用例）
 └── test_error.c           # 单元测试（≥ 3 用例）
@@ -215,11 +213,10 @@ test/integration/http_server/c_core/
 
 **文件清单**:
 ```
-library/http_server/
-├── include/router.h       # 路由匹配 API（约 40 行）
-├── src/router.c           # 实现（约 150 行）
+include/router.h       # 路由匹配 API（约 40 行）
+src/router.c           # 实现（约 150 行）
 
-test/integration/http_server/c_core/
+test/integration/c_core/
 └── test_router.c          # 单元测试（≥ 10 用例）
 ```
 
@@ -244,10 +241,10 @@ test/integration/http_server/c_core/
 
 **文件清单**:
 ```
-library/http_server/examples/
+examples/
 └── minimal_server.c       # 最小服务器（约 200 行）
 
-test/integration/http_server/c_core/
+test/integration/c_core/
 └── test_minimal_server.c  # 集成测试（≥ 5 用例）
 ```
 
@@ -715,7 +712,7 @@ jobs:
     - name: Verify OpenSSL version
       run: |
         cd ${{ matrix.build-dir }}
-        ldd library/http_server/examples/minimal_server | grep ssl
+        ldd examples/minimal_server | grep ssl
         # 输出: libssl.so.1.1 (1.1.1) 或 libssl.so.3 (3.x)
 ```
 
@@ -782,7 +779,7 @@ fi
 #### 4. CMakeLists.txt OpenSSL 版本检测
 
 ```cmake
-# library/http_server/CMakeLists.txt
+# CMakeLists.txt
 
 find_package(OpenSSL REQUIRED)
 
@@ -812,7 +809,7 @@ target_link_libraries(http_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 #### 5. 测试标签配置
 
 ```cmake
-# test/integration/http_server/c_core/CMakeLists.txt
+# test/integration/c_core/CMakeLists.txt
 
 # SSL 相关测试添加标签
 add_test(NAME test_ssl_handshake
@@ -1167,7 +1164,7 @@ cfg->connection_rate_per_ip = 20;     // 连接速率
 #### 异步延迟模拟器实现（简化版）
 
 ```cpp
-// test/integration/http_server/cpp_api/async_delay_simulator.hpp
+// test/integration/cpp_api/async_delay_simulator.hpp
 
 class AsyncDelaySimulator {
 public:
@@ -1315,15 +1312,15 @@ echo "=== 异步中间件延迟测试 ==="
 
 # 场景 E: 纯唤醒机制延迟（推荐用于验收）
 echo ">>> 场景 E: 空异步操作（纯唤醒机制）"
-./build/test/integration/http_server/cpp_api/test_async_middleware --scenario empty
+./build/test/integration/cpp_api/test_async_middleware --scenario empty
 
 # 场景 A: 模拟数据库查询（验证唤醒机制不受数据库延迟影响）
 echo ">>> 场景 A: 模拟数据库查询（延迟 10-50ms）"
-./build/test/integration/http_server/cpp_api/test_async_middleware --scenario database --delay 20
+./build/test/integration/cpp_api/test_async_middleware --scenario database --delay 20
 
 # 场景 B: 模拟 HTTP 外部请求（验证唤醒机制不受 HTTP 延迟影响）
 echo ">>> 场景 B: 模拟 HTTP 请求（延迟 100-500ms）"
-./build/test/integration/http_server/cpp_api/test_async_middleware --scenario http_request --delay 200
+./build/test/integration/cpp_api/test_async_middleware --scenario http_request --delay 200
 
 echo "=== 测试完成 ==="
 ```
@@ -1471,7 +1468,7 @@ wrk -t4 -c100 -d30s --latency http://localhost:8081/  # nginx
 vcpkg install libevent
 
 # 2. 编写 libevent 对照服务器（类似 minimal_server.c）
-// library/http_server/examples/libevent_server.c
+// examples/libevent_server.c
 #include <event2/event.h>
 #include <event2/buffer.h>
 #include <event2/http.h>
@@ -1543,7 +1540,7 @@ libevent 对照（EventLoop 性能）:
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 6.4.1 | 创建 program/http_server_demo/（完整示例） | P0 | [Phase 5] | [6.1.1] | 待开始 |
+| 6.4.1 | 创建 demo/（完整示例） | P0 | [Phase 5] | [6.1.1] | 待开始 |
 | 6.4.2 | 实现 demo 程序（含静态文件 + 路由 + 中间件） | P0 | [6.4.1] | - | 待开始 |
 | 6.4.3 | 编写 demo README.md | P1 | [6.4.2] | - | 待开始 |
 
@@ -1668,7 +1665,7 @@ git tag phase-1-complete
 git reset --hard phase-1-start
 
 # 回滚单个文件
-git checkout phase-1-start -- library/http_server/src/eventloop.c
+git checkout phase-1-start -- src/eventloop.c
 
 # 查看 checkpoint 历史
 git log --oneline --grep="checkpoint"
@@ -1697,7 +1694,7 @@ git checkout -b feature/http-server-phase-1
 git push -u origin feature/http-server-phase-1
 
 # 2. 在 feature 分支开发
-git add library/http_server/
+git add src/ include/
 git commit -m "feat(eventloop): implement epoll backend"
 
 # 3. 创建 checkpoint tag（在 feature 分支）
@@ -1931,12 +1928,12 @@ echo "=== Phase 质量门禁检查 ==="
 
 # 1. 代码风格
 echo ">>> clang-format 检查"
-find library/http_server -name "*.c" -o -name "*.h" | xargs clang-format --dry-run --Werror
+find src include -name "*.c" -o -name "*.h" | xargs clang-format --dry-run --Werror
 if [ $? -ne 0 ]; then echo "FAIL: clang-format"; exit 1; fi
 
 # 2. 静态分析
 echo ">>> clang-tidy 检查"
-clang-tidy library/http_server/src/*.c -- -std=c11 -I./library/http_server/include
+clang-tidy src/*.c -- -std=c11 -I./include
 if [ $? -ne 0 ]; then echo "FAIL: clang-tidy"; exit 1; fi
 
 # 3. 编译
@@ -1957,7 +1954,7 @@ if [ "$COVERAGE" -lt 70 ]; then echo "FAIL: coverage $COVERAGE%"; exit 1; fi
 
 # 6. 内存检查
 echo ">>> Valgrind 内存检查"
-valgrind --leak-check=full --error-exitcode=1 ./build/test/minimal_server_test 10
+valgrind --leak-check=full --error-exitcode=1 ./build/test/integration/c_core/test_minimal_server 10
 if [ $? -ne 0 ]; then echo "FAIL: valgrind"; exit 1; fi
 
 echo "=== 所有门禁通过 ==="
@@ -2170,7 +2167,7 @@ hey -z 60s -c 100 -q 20 http://localhost:8080/ > latency_report.txt
 echo "=== HTTP Server 快速基准测试 ==="
 
 # 启动服务器（假设已编译）
-./build/library/http_server/examples/minimal_server &
+./build/examples/minimal_server &
 SERVER_PID=$!
 sleep 2  # 等待服务器启动
 
