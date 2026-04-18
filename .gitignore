@@ -53,3 +53,6 @@ x86/
 *.tmp
 *.temp
 *.log
+
+# Worktrees
+.worktrees/
