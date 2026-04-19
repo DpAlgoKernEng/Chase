@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "chase-http-server",
+  "version": "0.1.0",
+  "description": "High-performance HTTP/1.1 server library",
+  "homepage": "https://github.com/dpalgokerneng/Chase",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "openssl",
+      "version>=": "1.1.1"
+    },
+    {
+      "name": "zlib",
+      "version>=": "1.2.11"
+    }
+  ],
+  "features": {
+    "test": {
+      "description": "Build with test support",
+      "dependencies": []
+    }
+  }
+}
