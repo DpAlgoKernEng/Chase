@@ -4,7 +4,6 @@ out/
 cmake-build-*/
 
 # IDE and editor
-.vscode/
 .idea/
 *.swp
 *.swo
