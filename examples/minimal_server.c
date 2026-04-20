@@ -173,7 +173,7 @@ static int create_server_socket(int port) {
     }
 
     /* 监听 */
-    if (listen(fd, 128) < 0) {
+    if (listen(fd, 1024) < 0) {
         perror("listen");
         close(fd);
         return -1;

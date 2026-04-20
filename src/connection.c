@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 
 /* 默认缓冲区配置 */
 #define DEFAULT_READ_BUF_CAP   (16 * 1024)   /* 16KB */
@@ -27,6 +28,15 @@ struct Connection {
     Buffer *read_buf;
     Buffer *write_buf;
     ConnState state;
+
+    /* 用户数据（用于存储连接上下文） */
+    void *user_data;
+
+    /* 池管理字段（内部使用） */
+    Connection *next;              /* 链表下一个指针 */
+    Connection *prev;              /* 链表上一个指针 */
+    uint64_t release_time;         /* 惰性释放时间记录 */
+    int is_temp_allocated;         /* 标记：0 = 预分配, 1 = 临时 malloc */
 };
 
 /* ========== Buffer 实现 ========== */
@@ -186,6 +196,13 @@ Connection *connection_create_ex(int fd, EventLoop *loop,
         return NULL;
     }
 
+    /* 初始化池管理字段 */
+    conn->next = NULL;
+    conn->prev = NULL;
+    conn->release_time = 0;
+    conn->is_temp_allocated = 0;
+    conn->user_data = NULL;
+
     return conn;
 }
 
@@ -276,4 +293,126 @@ ConnState connection_get_state(Connection *conn) {
 int connection_get_fd(Connection *conn) {
     if (!conn) return -1;
     return conn->fd;
+}
+
+/* ========== 连接池管理字段 API 实现 ========== */
+
+Connection *connection_get_next(Connection *conn) {
+    if (!conn) return NULL;
+    return conn->next;
+}
+
+void connection_set_next(Connection *conn, Connection *next) {
+    if (!conn) return;
+    conn->next = next;
+}
+
+Connection *connection_get_prev(Connection *conn) {
+    if (!conn) return NULL;
+    return conn->prev;
+}
+
+void connection_set_prev(Connection *conn, Connection *prev) {
+    if (!conn) return;
+    conn->prev = prev;
+}
+
+uint64_t connection_get_release_time(Connection *conn) {
+    if (!conn) return 0;
+    return conn->release_time;
+}
+
+void connection_set_release_time(Connection *conn, uint64_t time) {
+    if (!conn) return;
+    conn->release_time = time;
+}
+
+int connection_is_temp_allocated(Connection *conn) {
+    if (!conn) return 0;
+    return conn->is_temp_allocated;
+}
+
+void connection_set_temp_allocated(Connection *conn, int is_temp) {
+    if (!conn) return;
+    conn->is_temp_allocated = is_temp;
+}
+
+/* ========== 用户数据 API ========== */
+
+void *connection_get_user_data(Connection *conn) {
+    if (!conn) return NULL;
+    return conn->user_data;
+}
+
+void connection_set_user_data(Connection *conn, void *user_data) {
+    if (!conn) return;
+    conn->user_data = user_data;
+}
+
+/* ========== Connection Pool 重用 API ========== */
+
+void connection_reset(Connection *conn) {
+    if (!conn) return;
+
+    /* 重置缓冲区状态（不释放内存，只重置索引） */
+    if (conn->read_buf) {
+        conn->read_buf->size = 0;
+        conn->read_buf->head = 0;
+        conn->read_buf->tail = 0;
+    }
+
+    if (conn->write_buf) {
+        conn->write_buf->size = 0;
+        conn->write_buf->head = 0;
+        conn->write_buf->tail = 0;
+    }
+
+    /* 重置状态 */
+    conn->state = CONN_STATE_CONNECTING;
+
+    /* 重置池管理字段 */
+    conn->release_time = 0;
+    conn->next = NULL;
+    conn->prev = NULL;
+
+    /* 保留 user_data，由调用者管理 */
+}
+
+int connection_init_from_pool(Connection *conn, int fd, EventLoop *loop) {
+    if (!conn || fd < 0) return -1;
+
+    /* 重置连接状态 */
+    connection_reset(conn);
+
+    /* 设置新的 fd 和 loop */
+    conn->fd = fd;
+    conn->loop = loop;
+
+    /* 设置非阻塞 */
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    conn->state = CONN_STATE_READING;
+
+    return 0;
+}
+
+void connection_dissociate_fd(Connection *conn) {
+    if (!conn) return;
+
+    /* 关闭 fd */
+    if (conn->fd >= 0) {
+        close(conn->fd);
+        conn->fd = -1;
+    }
+
+    /* 从 EventLoop 移除（如果已注册） */
+    if (conn->loop) {
+        /* 注意：需要调用者在 dissociate 前调用 eventloop_remove */
+        conn->loop = NULL;
+    }
+
+    /* 重置状态 */
+    conn->state = CONN_STATE_CLOSED;
 }

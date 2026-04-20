@@ -44,6 +44,9 @@ set(CHASE_CORE_HEADERS
     include/http_parser.h
     include/router.h
     include/error.h
+    include/thread_pool_manager.h
+    include/fileserve.h
+    include/connection_pool.h
 )
 
 set(CHASE_CORE_SOURCES
@@ -53,6 +56,9 @@ set(CHASE_CORE_SOURCES
     src/http_parser.c
     src/router.c
     src/error.c
+    src/thread_pool_manager.c
+    src/fileserve.c
+    src/connection_pool.c
 )
 
 # 创建核心库

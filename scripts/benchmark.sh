@@ -1,11 +1,21 @@
 #!/bin/bash
 # Performance benchmark script using wrk
-# Usage: ./scripts/benchmark.sh [port]
+# Usage: ./scripts/benchmark.sh [port] [server_type]
+# server_type: "minimal" (single-threaded) or "threaded" (multi-threaded)
 
 set -e
 
-PORT="${1:-9080}"
-SERVER_EXE="./build/examples/minimal_server"
+PORT="${1:-9090}"
+SERVER_TYPE="${2:-threaded}"
+
+if [ "${SERVER_TYPE}" == "minimal" ]; then
+    SERVER_EXE="./build/examples/minimal_server"
+    WORKER_COUNT=1
+else
+    SERVER_EXE="./build/examples/threaded_server"
+    WORKER_COUNT=4
+fi
+
 RESULTS_DIR="./benchmark_results"
 
 echo "=== Chase HTTP Server Benchmark ==="
@@ -30,8 +40,12 @@ fi
 mkdir -p "${RESULTS_DIR}"
 
 # Start server
-echo "Starting server on port ${PORT}..."
-"${SERVER_EXE}" "${PORT}" &
+echo "Starting ${SERVER_TYPE} server on port ${PORT}..."
+if [ "${SERVER_TYPE}" == "threaded" ]; then
+    "${SERVER_EXE}" "${PORT}" "${WORKER_COUNT}" &
+else
+    "${SERVER_EXE}" "${PORT}" &
+fi
 SERVER_PID=$!
 sleep 2  # Wait for server to start
 

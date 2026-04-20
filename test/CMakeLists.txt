@@ -10,12 +10,15 @@ set(TEST_SOURCES
     integration/c_core/test_connection.c
     integration/c_core/test_error.c
     integration/c_core/test_boundary.c
+    integration/c_core/test_thread_pool_manager.c
+    integration/c_core/test_fileserve.c
+    integration/c_core/test_connection_pool.c
 )
 
 # 创建测试可执行文件
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
     get_filename_component(TEST_NAME ${TEST_SRC} NAME_WE)
     add_executable(${TEST_NAME} ${TEST_SRC})
-    target_link_libraries(${TEST_NAME} chase_core)
+    target_link_libraries(${TEST_NAME} chase_core pthread)
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endforeach()
