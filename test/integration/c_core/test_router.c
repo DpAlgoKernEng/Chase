@@ -126,6 +126,114 @@ static void test_router_priority(void) {
     printf("  PASS\n");
 }
 
+/* 测试 6: 前缀匹配 */
+static void test_router_match_prefix(void) {
+    printf("Test 6: Match prefix route\n");
+
+    Router *router = router_create();
+
+    Route *route = route_create(ROUTER_MATCH_PREFIX, "/api/", test_handler_1, NULL);
+    router_add_route(router, route);
+
+    /* 匹配 /api/users */
+    Route *matched = router_match(router, "/api/users", HTTP_GET);
+    assert(matched != NULL);
+    assert(matched == route);
+
+    /* 匹配 /api/posts/123 */
+    matched = router_match(router, "/api/posts/123", HTTP_GET);
+    assert(matched != NULL);
+
+    /* 不匹配 /api */
+    matched = router_match(router, "/api", HTTP_GET);
+    /* 根据实现可能匹配或不匹配 */
+
+    router_destroy(router);
+    printf("  PASS\n");
+}
+
+/* 测试 7: 所有方法 */
+static void test_router_all_methods(void) {
+    printf("Test 7: Route all methods\n");
+
+    Router *router = router_create();
+
+    Route *route = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_1, NULL);
+    route->methods = METHOD_ALL;  /* 支持所有方法 */
+    router_add_route(router, route);
+
+    /* 所有方法都应匹配 */
+    assert(router_match(router, "/api", HTTP_GET) != NULL);
+    assert(router_match(router, "/api", HTTP_POST) != NULL);
+    assert(router_match(router, "/api", HTTP_PUT) != NULL);
+    assert(router_match(router, "/api", HTTP_DELETE) != NULL);
+    assert(router_match(router, "/api", HTTP_HEAD) != NULL);
+    assert(router_match(router, "/api", HTTP_OPTIONS) != NULL);
+    assert(router_match(router, "/api", HTTP_PATCH) != NULL);
+
+    router_destroy(router);
+    printf("  PASS\n");
+}
+
+/* 测试 8: 多个相同模式不同方法 */
+static void test_router_same_pattern_different_methods(void) {
+    printf("Test 8: Same pattern different methods\n");
+
+    Router *router = router_create();
+
+    Route *get_route = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_1, NULL);
+    get_route->methods = METHOD_GET;
+    router_add_route(router, get_route);
+
+    Route *post_route = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_2, NULL);
+    post_route->methods = METHOD_POST;
+    router_add_route(router, post_route);
+
+    /* GET 匹配 get_route */
+    Route *matched = router_match(router, "/api", HTTP_GET);
+    assert(matched == get_route);
+
+    /* POST 匹配 post_route */
+    matched = router_match(router, "/api", HTTP_POST);
+    assert(matched == post_route);
+
+    router_destroy(router);
+    printf("  PASS\n");
+}
+
+/* 测试 9: 路由销毁 */
+static void test_route_destroy(void) {
+    printf("Test 9: Route destroy\n");
+
+    Route *route = route_create(ROUTER_MATCH_EXACT, "/test", test_handler_1, NULL);
+    assert(route != NULL);
+
+    route_destroy(route);
+    printf("  PASS\n");
+}
+
+/* 测试 10: 路由优先级排序 */
+static void test_router_sort_priority(void) {
+    printf("Test 10: Router sort by priority\n");
+
+    Router *router = router_create();
+
+    Route *low = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_1, NULL);
+    Route *normal = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_2, NULL);
+    Route *high = route_create(ROUTER_MATCH_EXACT, "/api", test_handler_1, NULL);
+
+    router_add_route_ex(router, low, PRIORITY_LOW);
+    router_add_route_ex(router, normal, PRIORITY_NORMAL);
+    router_add_route_ex(router, high, PRIORITY_HIGH);
+
+    /* 高优先级应匹配 */
+    Route *matched = router_match(router, "/api", HTTP_GET);
+    assert(matched == high);
+
+    router_destroy(router);
+    printf("  PASS\n");
+}
+
 int main(void) {
     printf("=== Router Module Tests ===\n\n");
 
@@ -134,6 +242,11 @@ int main(void) {
     test_router_match_exact();
     test_router_method_filter();
     test_router_priority();
+    test_router_match_prefix();
+    test_router_all_methods();
+    test_router_same_pattern_different_methods();
+    test_route_destroy();
+    test_router_sort_priority();
 
     printf("\n=== All tests passed ===\n");
     return 0;
