@@ -9,6 +9,7 @@ set(TEST_SOURCES
     integration/c_core/test_router.c
     integration/c_core/test_connection.c
     integration/c_core/test_error.c
+    integration/c_core/test_boundary.c
 )
 
 # 创建测试可执行文件

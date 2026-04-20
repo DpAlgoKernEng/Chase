@@ -3,23 +3,59 @@
 #include <string.h>
 #include <ctype.h>
 
+/* 解析状态（增量状态机） */
+typedef enum {
+    PARSER_STATE_INIT,           /* 初始状态 */
+    PARSER_STATE_METHOD,         /* 解析方法 */
+    PARSER_STATE_METHOD_END,     /* 方法后空格 */
+    PARSER_STATE_PATH,           /* 解析路径 */
+    PARSER_STATE_QUERY,          /* 解析查询参数 */
+    PARSER_STATE_PATH_END,       /* 路径后空格 */
+    PARSER_STATE_VERSION,        /* 解析版本 */
+    PARSER_STATE_VERSION_CR,     /* 版本后 CR */
+    PARSER_STATE_VERSION_LF,     /* 版本后 LF */
+    PARSER_STATE_HEADER_NAME,    /* 解析头部名称 */
+    PARSER_STATE_HEADER_COLON,   /* 头部冒号 */
+    PARSER_STATE_HEADER_VALUE,   /* 解析头部值 */
+    PARSER_STATE_HEADER_CR,      /* 头部值后 CR */
+    PARSER_STATE_HEADER_LF,      /* 头部值后 LF */
+    PARSER_STATE_HEADERS_END_CR, /* 空行 CR */
+    PARSER_STATE_HEADERS_END_LF, /* 空行 LF（头部结束） */
+    PARSER_STATE_BODY,           /* 解析 body */
+    PARSER_STATE_COMPLETE        /* 解析完成 */
+} ParserState;
+
 /* HttpParser 结构体 */
 struct HttpParser {
-    int state;              /* 解析状态 */
-    size_t parsed_len;      /* 已解析长度 */
-    char *method_str;       /* 方法字符串缓冲 */
-    int method_len;
-};
+    ParserState state;           /* 当前解析状态 */
+    size_t parsed_len;           /* 已解析长度 */
 
-/* 解析状态 */
-enum ParserState {
-    PARSER_STATE_METHOD,
-    PARSER_STATE_PATH,
-    PARSER_STATE_VERSION,
-    PARSER_STATE_HEADER_NAME,
-    PARSER_STATE_HEADER_VALUE,
-    PARSER_STATE_BODY,
-    PARSER_STATE_COMPLETE
+    /* 临时缓冲区（用于增量解析） */
+    char *method_buf;            /* 方法缓冲区 */
+    int method_len;
+    int method_capacity;
+
+    char *path_buf;              /* 路径缓冲区 */
+    int path_len;
+    int path_capacity;
+
+    char *query_buf;             /* 查询参数缓冲区 */
+    int query_len;
+    int query_capacity;
+
+    char *version_buf;           /* 版本缓冲区 */
+    int version_len;
+    int version_capacity;
+
+    char *header_name_buf;       /* 头部名称缓冲区 */
+    int header_name_len;
+    int header_name_capacity;
+
+    char *header_value_buf;      /* 头部值缓冲区 */
+    int header_value_len;
+    int header_value_capacity;
+
+    size_t body_received;        /* 已接收 body 长度 */
 };
 
 /* ========== 辅助函数 ========== */
@@ -36,11 +72,25 @@ static HttpMethod parse_method(const char *method, int len) {
 }
 
 static char *strndup_custom(const char *s, size_t n) {
+    if (n == 0) return NULL;
     char *dup = malloc(n + 1);
     if (!dup) return NULL;
     memcpy(dup, s, n);
     dup[n] = '\0';
     return dup;
+}
+
+static int append_to_buffer(char **buf, int *len, int *capacity, char c) {
+    if (*len >= *capacity) {
+        int new_cap = *capacity * 2;
+        if (new_cap < 16) new_cap = 16;
+        char *new_buf = realloc(*buf, new_cap);
+        if (!new_buf) return -1;
+        *buf = new_buf;
+        *capacity = new_cap;
+    }
+    (*buf)[(*len)++] = c;
+    return 0;
 }
 
 static int add_header(HttpRequest *req, const char *name, int name_len,
@@ -72,17 +122,53 @@ HttpParser *http_parser_create(void) {
     HttpParser *parser = malloc(sizeof(HttpParser));
     if (!parser) return NULL;
 
-    parser->state = PARSER_STATE_METHOD;
+    parser->state = PARSER_STATE_INIT;
     parser->parsed_len = 0;
-    parser->method_str = malloc(16);
+
+    /* 初始化缓冲区 */
+    parser->method_capacity = 16;
+    parser->method_buf = malloc(parser->method_capacity);
     parser->method_len = 0;
+
+    parser->path_capacity = 256;
+    parser->path_buf = malloc(parser->path_capacity);
+    parser->path_len = 0;
+
+    parser->query_capacity = 256;
+    parser->query_buf = malloc(parser->query_capacity);
+    parser->query_len = 0;
+
+    parser->version_capacity = 16;
+    parser->version_buf = malloc(parser->version_capacity);
+    parser->version_len = 0;
+
+    parser->header_name_capacity = 64;
+    parser->header_name_buf = malloc(parser->header_name_capacity);
+    parser->header_name_len = 0;
+
+    parser->header_value_capacity = 256;
+    parser->header_value_buf = malloc(parser->header_value_capacity);
+    parser->header_value_len = 0;
+
+    parser->body_received = 0;
+
+    if (!parser->method_buf || !parser->path_buf || !parser->query_buf ||
+        !parser->version_buf || !parser->header_name_buf || !parser->header_value_buf) {
+        http_parser_destroy(parser);
+        return NULL;
+    }
 
     return parser;
 }
 
 void http_parser_destroy(HttpParser *parser) {
     if (!parser) return;
-    free(parser->method_str);
+    free(parser->method_buf);
+    free(parser->path_buf);
+    free(parser->query_buf);
+    free(parser->version_buf);
+    free(parser->header_name_buf);
+    free(parser->header_value_buf);
     free(parser);
 }
 
@@ -126,104 +212,243 @@ void http_request_destroy(HttpRequest *req) {
     free(req);
 }
 
+/* ========== 增量状态机解析 ========== */
+
 ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                               const char *data, size_t len, size_t *consumed) {
     if (!parser || !req || !data) return PARSE_ERROR;
 
-    size_t pos = 0;
     *consumed = 0;
+    size_t pos = 0;
 
-    /* 简化版解析器：只处理完整请求 */
-    /* 查找请求结束标记 */
-    const char *header_end = strstr(data, "\r\n\r\n");
-    if (!header_end) {
-        return PARSE_NEED_MORE;  /* 需要更多数据 */
-    }
+    while (pos < len) {
+        char c = data[pos];
+        int ret = 0;
 
-    size_t header_len = header_end - data + 4;  /* 包含 \r\n\r\n */
-    *consumed = header_len;
-
-    /* 解析请求行 */
-    const char *line_start = data;
-    const char *line_end = strstr(data, "\r\n");
-    if (!line_end) return PARSE_ERROR;
-
-    /* 方法 */
-    const char *space1 = strchr(line_start, ' ');
-    if (!space1) return PARSE_ERROR;
-    int method_len = space1 - line_start;
-    req->method = parse_method(line_start, method_len);
-
-    /* 路径 */
-    const char *path_start = space1 + 1;
-    const char *space2 = strchr(path_start, ' ');
-    if (!space2) return PARSE_ERROR;
-
-    /* 查找 query */
-    const char *query_start = strchr(path_start, '?');
-    if (query_start && query_start < space2) {
-        req->path = strndup_custom(path_start, query_start - path_start);
-        req->query = strndup_custom(query_start + 1, space2 - query_start - 1);
-    } else {
-        req->path = strndup_custom(path_start, space2 - path_start);
-        req->query = NULL;
-    }
-
-    /* 版本 */
-    const char *version_start = space2 + 1;
-    req->version = strndup_custom(version_start, line_end - version_start);
-
-    /* 解析头部 */
-    const char *header_line = line_end + 2;
-    while (header_line < header_end) {
-        const char *next_line = strstr(header_line, "\r\n");
-        if (!next_line) break;
-
-        if (header_line == next_line) break;  /* 空行 */
-
-        const char *colon = strchr(header_line, ':');
-        if (!colon) {
-            header_line = next_line + 2;
+        switch (parser->state) {
+        case PARSER_STATE_INIT:
+            parser->state = PARSER_STATE_METHOD;
+            parser->method_len = 0;
+            /* 继续处理当前字符 */
             continue;
+
+        case PARSER_STATE_METHOD:
+            if (c == ' ') {
+                /* 方法结束 */
+                req->method = parse_method(parser->method_buf, parser->method_len);
+                parser->state = PARSER_STATE_METHOD_END;
+            } else {
+                ret = append_to_buffer(&parser->method_buf, &parser->method_len,
+                                       &parser->method_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_METHOD_END:
+            /* 跳过方法后的空格 */
+            if (c != ' ') {
+                parser->state = PARSER_STATE_PATH;
+                parser->path_len = 0;
+                /* 当前字符是路径开始，不跳过 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_PATH:
+            if (c == '?') {
+                /* 开始查询参数 */
+                parser->state = PARSER_STATE_QUERY;
+                parser->query_len = 0;
+            } else if (c == ' ') {
+                /* 路径结束 */
+                parser->state = PARSER_STATE_PATH_END;
+            } else {
+                ret = append_to_buffer(&parser->path_buf, &parser->path_len,
+                                       &parser->path_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_QUERY:
+            if (c == ' ') {
+                /* 查询参数结束 */
+                parser->state = PARSER_STATE_PATH_END;
+            } else {
+                ret = append_to_buffer(&parser->query_buf, &parser->query_len,
+                                       &parser->query_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_PATH_END:
+            /* 跳过路径后的空格 */
+            if (c != ' ') {
+                parser->state = PARSER_STATE_VERSION;
+                parser->version_len = 0;
+                /* 当前字符是版本开始，不跳过 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_VERSION:
+            if (c == '\r') {
+                /* 版本结束 */
+                parser->state = PARSER_STATE_VERSION_CR;
+            } else {
+                ret = append_to_buffer(&parser->version_buf, &parser->version_len,
+                                       &parser->version_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_VERSION_CR:
+            if (c == '\n') {
+                parser->state = PARSER_STATE_VERSION_LF;
+            } else {
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_VERSION_LF:
+            /* 开始解析头部 */
+            if (c == '\r') {
+                /* 可能是空行（头部结束） */
+                parser->state = PARSER_STATE_HEADERS_END_CR;
+            } else {
+                parser->state = PARSER_STATE_HEADER_NAME;
+                parser->header_name_len = 0;
+                /* 当前字符是头部名称开始，不跳过 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_HEADER_NAME:
+            if (c == ':') {
+                parser->state = PARSER_STATE_HEADER_COLON;
+            } else if (c == '\r') {
+                /* 空行，头部结束 */
+                parser->state = PARSER_STATE_HEADERS_END_CR;
+            } else {
+                ret = append_to_buffer(&parser->header_name_buf, &parser->header_name_len,
+                                       &parser->header_name_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_HEADER_COLON:
+            /* 跳过冒号后的空格 */
+            if (c == ' ') {
+                /* 继续跳过 */
+            } else {
+                parser->state = PARSER_STATE_HEADER_VALUE;
+                parser->header_value_len = 0;
+                /* 当前字符是头部值开始，不跳过 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_HEADER_VALUE:
+            if (c == '\r') {
+                /* 头部值结束 */
+                parser->state = PARSER_STATE_HEADER_CR;
+            } else {
+                ret = append_to_buffer(&parser->header_value_buf, &parser->header_value_len,
+                                       &parser->header_value_capacity, c);
+                if (ret < 0) return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_HEADER_CR:
+            if (c == '\n') {
+                /* 保存头部 */
+                add_header(req, parser->header_name_buf, parser->header_name_len,
+                           parser->header_value_buf, parser->header_value_len);
+
+                /* 检查 Content-Length */
+                if (strcasecmp(parser->header_name_buf, "Content-Length") == 0) {
+                    req->content_length = strtoul(parser->header_value_buf, NULL, 10);
+                }
+
+                parser->state = PARSER_STATE_HEADER_LF;
+            } else {
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_HEADER_LF:
+            /* 开始下一个头部或检查结束 */
+            if (c == '\r') {
+                /* 可能是空行（头部结束） */
+                parser->state = PARSER_STATE_HEADERS_END_CR;
+            } else {
+                parser->state = PARSER_STATE_HEADER_NAME;
+                parser->header_name_len = 0;
+                /* 当前字符是下一个头部名称开始，不跳过 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_HEADERS_END_CR:
+            if (c == '\n') {
+                /* 头部结束 */
+                parser->state = PARSER_STATE_HEADERS_END_LF;
+
+                /* 完成请求行和头部解析 */
+                req->path = strndup_custom(parser->path_buf, parser->path_len);
+                req->query = parser->query_len > 0 ?
+                             strndup_custom(parser->query_buf, parser->query_len) : NULL;
+                req->version = strndup_custom(parser->version_buf, parser->version_len);
+
+                /* 检查是否有 body */
+                if (req->content_length > 0) {
+                    parser->state = PARSER_STATE_BODY;
+                    parser->body_received = 0;
+                    req->body = malloc(req->content_length + 1);
+                    if (!req->body) return PARSE_ERROR;
+                } else {
+                    parser->state = PARSER_STATE_COMPLETE;
+                }
+            } else {
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_HEADERS_END_LF:
+            /* 这个状态只在无 body 时进入，立即完成 */
+            parser->state = PARSER_STATE_COMPLETE;
+            break;
+
+        case PARSER_STATE_BODY:
+            /* 收集 body 数据 */
+            if (parser->body_received < req->content_length) {
+                req->body[parser->body_received++] = c;
+                if (parser->body_received >= req->content_length) {
+                    req->body[parser->body_received] = '\0';
+                    req->body_length = parser->body_received;
+                    parser->state = PARSER_STATE_COMPLETE;
+                }
+            }
+            break;
+
+        case PARSER_STATE_COMPLETE:
+            /* 解析已完成 */
+            pos++;  /* 消耗当前字符 */
+            *consumed = pos;
+            parser->parsed_len += pos;
+            return PARSE_COMPLETE;
         }
 
-        /* 头部名称 */
-        int name_len = colon - header_line;
-
-        /* 头部值（跳过冒号后的空格） */
-        const char *value_start = colon + 1;
-        while (*value_start == ' ' && value_start < next_line) {
-            value_start++;
-        }
-        int value_len = next_line - value_start;
-
-        add_header(req, header_line, name_len, value_start, value_len);
-
-        /* Content-Length 特殊处理 */
-        if (strncmp(header_line, "Content-Length", name_len) == 0 ||
-            strncmp(header_line, "content-length", name_len) == 0) {
-            req->content_length = strtoul(value_start, NULL, 10);
-        }
-
-        header_line = next_line + 2;
+        pos++;  /* 消耗当前字符 */
     }
 
-    /* 解析 body（如果有） */
-    if (req->content_length > 0 && len > header_len) {
-        size_t body_avail = len - header_len;
-        if (body_avail >= req->content_length) {
-            req->body = strndup_custom(header_end + 4, req->content_length);
-            req->body_length = req->content_length;
-            *consumed = header_len + req->content_length;
-        } else {
-            req->body = strndup_custom(header_end + 4, body_avail);
-            req->body_length = body_avail;
-            *consumed = len;
-            return PARSE_NEED_MORE;
-        }
-    }
+    *consumed = pos;
+    parser->parsed_len += pos;
 
-    return PARSE_COMPLETE;
+    /* 返回当前状态 */
+    if (parser->state == PARSER_STATE_COMPLETE) {
+        return PARSE_COMPLETE;
+    }
+    return PARSE_NEED_MORE;
 }
 
 HttpHeader *http_request_get_header(HttpRequest *req, const char *name) {
@@ -245,7 +470,14 @@ const char *http_request_get_header_value(HttpRequest *req, const char *name) {
 
 void http_parser_reset(HttpParser *parser) {
     if (!parser) return;
-    parser->state = PARSER_STATE_METHOD;
+
+    parser->state = PARSER_STATE_INIT;
     parser->parsed_len = 0;
     parser->method_len = 0;
+    parser->path_len = 0;
+    parser->query_len = 0;
+    parser->version_len = 0;
+    parser->header_name_len = 0;
+    parser->header_value_len = 0;
+    parser->body_received = 0;
 }

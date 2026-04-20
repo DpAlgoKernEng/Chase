@@ -14,6 +14,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(ENABLE_TESTS "Enable unit tests" ON)
 option(ENABLE_COVERAGE "Enable code coverage" OFF)
 option(ENABLE_EXAMPLES "Build example programs" ON)
+option(ENABLE_VALGRIND "Enable Valgrind memory check" ON)
 
 # 查找依赖
 find_package(OpenSSL REQUIRED)
@@ -93,3 +94,20 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Tests: ${ENABLE_TESTS}")
 message(STATUS "Coverage: ${ENABLE_COVERAGE}")
 message(STATUS "Examples: ${ENABLE_EXAMPLES}")
+message(STATUS "Valgrind: ${ENABLE_VALGRIND}")
+
+# Valgrind 内存检测目标
+if(ENABLE_VALGRIND AND ENABLE_TESTS)
+    find_program(VALGRIND_EXECUTABLE valgrind)
+    if(VALGRIND_EXECUTABLE)
+        add_custom_target(valgrind
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/run_valgrind.sh
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Running Valgrind memory check on all tests"
+            VERBATIM
+        )
+        message(STATUS "Valgrind found: ${VALGRIND_EXECUTABLE}")
+    else()
+        message(STATUS "Valgrind not found - valgrind target disabled")
+    endif()
+endif()

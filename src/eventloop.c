@@ -31,6 +31,9 @@ struct EventLoop {
     int running;
     EventEntry *entries;     /* fd -> EventEntry 映射 */
     int entries_capacity;
+
+    /* 预分配的事件数组（避免每次 poll 动态分配） */
+    void *poll_events;       /* epoll_event / kevent / pollfd 数组 */
 };
 
 /* ========== 平台后端实现 ========== */
@@ -43,12 +46,23 @@ static int backend_init_epoll(EventLoop *loop) {
     if (loop->backend_fd < 0) {
         return -1;
     }
+
+    /* 预分配 epoll_event 数组 */
+    loop->poll_events = malloc(loop->max_events * sizeof(struct epoll_event));
+    if (!loop->poll_events) {
+        close(loop->backend_fd);
+        return -1;
+    }
+
     return 0;
 }
 
 static void backend_destroy_epoll(EventLoop *loop) {
     if (loop->backend_fd >= 0) {
         close(loop->backend_fd);
+    }
+    if (loop->poll_events) {
+        free(loop->poll_events);
     }
 }
 
@@ -80,14 +94,14 @@ static int backend_remove_epoll(EventLoop *loop, int fd) {
 }
 
 static int backend_poll_epoll(EventLoop *loop, int timeout_ms,
-                               void (*callback)(int fd, uint32_t events, void *data),
+                               void (*callback)(int fd, uint32_t events, void *data) __attribute__((unused)),
                                EventEntry *entries) {
-    struct epoll_event *events = malloc(loop->max_events * sizeof(struct epoll_event));
+    /* 使用预分配的事件数组 */
+    struct epoll_event *events = (struct epoll_event *)loop->poll_events;
     if (!events) return -1;
 
     int n = epoll_wait(loop->backend_fd, events, loop->max_events, timeout_ms);
     if (n < 0) {
-        free(events);
         return -1;
     }
 
@@ -105,7 +119,6 @@ static int backend_poll_epoll(EventLoop *loop, int timeout_ms,
         }
     }
 
-    free(events);
     return n;
 }
 
@@ -119,12 +132,23 @@ static int backend_init_kqueue(EventLoop *loop) {
     if (loop->backend_fd < 0) {
         return -1;
     }
+
+    /* 预分配 kevent 数组 */
+    loop->poll_events = malloc(loop->max_events * sizeof(struct kevent));
+    if (!loop->poll_events) {
+        close(loop->backend_fd);
+        return -1;
+    }
+
     return 0;
 }
 
 static void backend_destroy_kqueue(EventLoop *loop) {
     if (loop->backend_fd >= 0) {
         close(loop->backend_fd);
+    }
+    if (loop->poll_events) {
+        free(loop->poll_events);
     }
 }
 
@@ -182,9 +206,10 @@ static int backend_remove_kqueue(EventLoop *loop, int fd) {
 }
 
 static int backend_poll_kqueue(EventLoop *loop, int timeout_ms,
-                                void (*callback)(int fd, uint32_t events, void *data),
+                                void (*callback)(int fd, uint32_t events, void *data) __attribute__((unused)),
                                 EventEntry *entries) {
-    struct kevent *events = malloc(loop->max_events * sizeof(struct kevent));
+    /* 使用预分配的事件数组 */
+    struct kevent *events = (struct kevent *)loop->poll_events;
     if (!events) return -1;
 
     struct timespec ts;
@@ -197,7 +222,6 @@ static int backend_poll_kqueue(EventLoop *loop, int timeout_ms,
 
     int n = kevent(loop->backend_fd, NULL, 0, events, loop->max_events, tsp);
     if (n < 0) {
-        free(events);
         return -1;
     }
 
@@ -215,7 +239,6 @@ static int backend_poll_kqueue(EventLoop *loop, int timeout_ms,
         }
     }
 
-    free(events);
     return n;
 }
 
@@ -226,11 +249,21 @@ static int backend_poll_kqueue(EventLoop *loop, int timeout_ms,
 
 static int backend_init_poll(EventLoop *loop) {
     loop->backend_fd = -1;  /* poll 不需要特殊 fd */
+
+    /* 预分配 pollfd 数组 */
+    loop->poll_events = malloc(loop->max_events * sizeof(struct pollfd));
+    if (!loop->poll_events) {
+        return -1;
+    }
+
     return 0;
 }
 
 static void backend_destroy_poll(EventLoop *loop) {
-    /* poll 无需清理 */
+    /* poll 无需清理 backend_fd */
+    if (loop->poll_events) {
+        free(loop->poll_events);
+    }
 }
 
 static int backend_add_poll(EventLoop *loop, int fd, uint32_t events) {
@@ -247,9 +280,10 @@ static int backend_remove_poll(EventLoop *loop, int fd) {
 }
 
 static int backend_poll_poll(EventLoop *loop, int timeout_ms,
-                              void (*callback)(int fd, uint32_t events, void *data),
+                              void (*callback)(int fd, uint32_t events, void *data) __attribute__((unused)),
                               EventEntry *entries) {
-    struct pollfd *pfds = malloc(loop->max_events * sizeof(struct pollfd));
+    /* 使用预分配的事件数组 */
+    struct pollfd *pfds = (struct pollfd *)loop->poll_events;
     if (!pfds) return -1;
 
     /* 构建 pollfd 数组 */
@@ -266,13 +300,11 @@ static int backend_poll_poll(EventLoop *loop, int timeout_ms,
     }
 
     if (n_fds == 0) {
-        free(pfds);
         return 0;
     }
 
     int n = poll(pfds, n_fds, timeout_ms);
     if (n < 0) {
-        free(pfds);
         return -1;
     }
 
@@ -292,7 +324,6 @@ static int backend_poll_poll(EventLoop *loop, int timeout_ms,
         }
     }
 
-    free(pfds);
     return n;
 }
 
@@ -301,11 +332,17 @@ static int backend_poll_poll(EventLoop *loop, int timeout_ms,
 /* ========== 公共 API 实现 ========== */
 
 EventLoop *eventloop_create(int max_events) {
+    /* 验证参数 */
+    if (max_events <= 0) {
+        return NULL;
+    }
+
     EventLoop *loop = malloc(sizeof(EventLoop));
     if (!loop) return NULL;
 
     loop->max_events = max_events;
     loop->running = 0;
+    loop->poll_events = NULL;  /* 初始化为 NULL */
 
     /* 预分配 entries 数组（按 FD 数量） */
     loop->entries_capacity = 1024;  /* 初始容量 */
@@ -330,7 +367,11 @@ EventLoop *eventloop_create(int max_events) {
         return NULL;
     }
 #elif defined(USE_POLL)
-    backend_init_poll(loop);
+    if (backend_init_poll(loop) < 0) {
+        free(loop->entries);
+        free(loop);
+        return NULL;
+    }
 #endif
 
     return loop;
