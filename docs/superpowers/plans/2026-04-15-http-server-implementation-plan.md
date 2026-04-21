@@ -1,82 +1,63 @@
-# HTTP 服务器库实施计划（改进版 v3.0）
+# HTTP 服务器库实施计划（修订版 v2.0）
 
-**基于设计文档**: `docs/superpowers/specs/2026-04-13-http-server-library-design.md` (v1.4)
-**创建日期**: 2026-04-15
-**修订日期**: 2026-04-17
-**总工作量**: 30-37 周（含 30% 缓冲时间）
+**基于设计文档**: `docs/superpowers/specs/2026-04-13-http-server-library-design.md` (v2.0)  
+**架构**: SO_REUSEPORT + 多进程架构  
+**创建日期**: 2026-04-15（初版） / 2026-04-21（修订版）  
+**总工作量**: 15-21 周
 
-**v3.0 修订说明**:
-- 补充 Phase 2-5 覆盖率目标（≥ 70%）
-- 补充 Phase 2/3/4/5/6 失败处理策略
-- 补充缺失风险项（C++ API 易用性、异步唤醒机制、分布式限流竞态、高并发性能瓶颈）
-- 添加回滚机制与分支保护策略
-- 添加进度跟踪机制与 TaskUpdate 工具使用示例
-- 添加优先级调整机制
-- 添加 Phase 转换质量门禁检查清单
-
-**v3.0 改进项补充（2026-04-17）**:
-- 补充 Timer ID 类型明确使用 uint64_t（Phase 1 任务 1.2.2）
-- 补充 Timer 精度测试验收标准（±1ms）
-- 补充负载均衡偏差计算公式（Phase 2）
-- 补充异步中间件 RequestSnapshot 实现细节（Phase 5 任务 5.2.2）
-- 补充分片锁哈希表配置明确默认分片数 16（Phase 5 任务 5.3.1）
-- 优化工作量估计（增加 30% 缓冲，总计 30-37 周）
-- 简化异步延迟测试场景（保留 2 个核心场景：空异步 + 模拟数据库）
-- 添加性能对照测试（nginx/libevent 对照，Phase 6 任务 6.3.4/6.3.5）
-- 添加 macOS 覆盖率工具替代方案（LLVM coverage / gcov）
-- 更新里程碑时间（反映工作量优化）
+**v2.0 修订说明（2026-04-21）**:
+- 从多线程架构升级为 SO_REUSEPORT 多进程架构
+- 废弃 ThreadPoolManager/WorkerThread，改为 Master/Worker 进程
+- 废弃 IPC 通知机制（eventfd/pipe）
+- 废弃 Least-Connections 分发策略，信任内核负载均衡
+- 新增进程管理（master.c）、信号处理、崩溃恢复
+- 保留核心模块（eventloop/timer/http_parser/router/connection）
+- 简化 Phase 结构，调整任务顺序
 
 ---
 
 ## 一、概述
 
-本计划将设计文档中的 6 个阶段分解为具体可执行的任务，每个任务都有明确的依赖关系、并行标注和量化验收标准。
+本计划将设计文档中的 6 个阶段分解为具体可执行的任务，每个任务都有明确的依赖关系和量化验收标准。
 
 ### 阶段依赖关系
 
 ```
-Phase 1 ──→ Phase 3 (timer 用于 timeout)
-    │
-    └──→ Phase 2 ──→ Phase 4 (ThreadPool 用于 SSL 多线程)
-                  │
-                  └──→ Phase 5 ──→ Phase 6 (security 用于 DDoS 测试)
+Phase 1 ──→ Phase 2 ──→ Phase 3 ──→ Phase 4 ──→ Phase 5 ──→ Phase 6
+(核心框架)  (多进程)     (HTTP/1.1)   (SSL)       (完善)       (优化)
 ```
 
-### 关键依赖说明
+### 与 v1.0 对比
 
-| 依赖 | 说明 |
-|------|------|
-| Phase 1 → Phase 3 | Phase 1 的 timer 是 Phase 3 超时管理的基础 |
-| Phase 1 → Phase 2 | Phase 1 的 eventloop 是 Phase 2 Worker 的基础 |
-| Phase 2 → Phase 4 | Phase 2 的 ThreadPool 是 Phase 4 SSL 多线程处理的基础 |
-| Phase 5 → Phase 6 | Phase 5 的 security 模块是 Phase 6 DDoS 压力测试的前提 |
+| Phase | v1.0 内容 | v2.0 内容 | 变化 |
+|-------|-----------|-----------|------|
+| Phase 1 | 单线程核心框架 | 单 Worker 核心框架 | 类似 |
+| Phase 2 | ThreadPoolManager + 静态文件 | Master/Worker 进程 | **完全重写** |
+| Phase 3 | HTTP/1.1 特性 | HTTP/1.1 特性 | 不变 |
+| Phase 4 | SSL + 虚拟主机 | SSL + 虚拟主机 | Worker 级 SSL_CTX |
+| Phase 5 | C++ 封装 + 中间件 + 安全 | 静态文件 + 安全 + 日志 | 调整顺序 |
+| Phase 6 | 完善与优化 | 文档 + 测试覆盖 | 不变 |
 
 ---
 
 ## 二、Phase 量化验收指标
 
-每个 Phase 必须达到以下量化指标才能进入下一阶段：
-
 | Phase | 关键指标 | 目标值 | 测试方法 |
 |-------|----------|--------|----------|
-| **Phase 1** | 单线程吞吐量 | ≥ 2000 req/s（未优化版本） | wrk -t1 -c10 -d10s |
+| **Phase 1** | 单 Worker 吞吐量 | ≥ 2000 req/s | wrk -t1 -c10 -d10s |
 | **Phase 1** | 单元测试覆盖率 | ≥ 70% | lcov 报告 |
-| **Phase 1** | 内存泄漏 | 0（Valgrind 10min 测试） | valgrind --leak-check=full |
-| **Phase 2** | 多线程吞吐量 | ≥ 5000 req/s (4 threads) | wrk -t4 -c100 -d10s |
-| **Phase 2** | 连接分发偏差 | < 10%（负载均衡） | 各 Worker 连接数统计 |
-| **Phase 2** | 静态文件吞吐量 | ≥ 3000 req/s | wrk 测试 1MB 文件 |
-| **Phase 2** | 单元测试覆盖率 | ≥ 70% | lcov 报告 |
+| **Phase 1** | 内存泄漏 | 0（Valgrind 10min） | valgrind --leak-check=full |
+| **Phase 2** | 多 Worker 吞吐量 | ≥ 5000 req/s (4 Workers) | wrk -t4 -c100 -d10s |
+| **Phase 2** | Worker 崩溃恢复 | < 3s | kill Worker + 监控重启 |
+| **Phase 2** | 平滑关闭 | 连接不丢失 | curl 测试 |
 | **Phase 3** | Keep-Alive 连接数 | ≥ 100 并发 | curl 并发测试 |
-| **Phase 3** | chunked 解析正确率 | 100%（50+ 测试用例） | 单元测试 |
-| **Phase 3** | 单元测试覆盖率 | ≥ 70% | lcov 报告 |
+| **Phase 3** | HTTP/1.1 合规 | 100% 通过 | 合规测试套件 |
 | **Phase 4** | HTTPS 握手延迟 | < 50ms | openssl s_client 测试 |
 | **Phase 4** | 虚拟主机匹配 | 100%（含通配符） | curl 多域名测试 |
-| **Phase 4** | 单元测试覆盖率 | ≥ 70% | lcov 报告 |
-| **Phase 5** | 异步中间件延迟 | < 5ms（不含异步操作本身） | 响应时间测量 + 异步模拟器 |
-| **Phase 5** | DDoS 防护生效 | 拒绝超限请求 | 模拟攻击测试 |
-| **Phase 5** | 单元测试覆盖率 | ≥ 70% | lcov 报告 |
+| **Phase 5** | 静态文件吞吐 | ≥ 3000 req/s | wrk 测试 1MB 文件 |
+| **Phase 5** | DDoS 防护 | 拒绝超限请求 | 模拟攻击测试 |
 | **Phase 6** | 测试覆盖率 | ≥ 80% | lcov 报告 |
-| **Phase 6** | 内存泄漏 | 0（24h 压力测试） | valgrind + 长跑测试 |
+| **Phase 6** | 内存泄漏 | 0（24h 压力测试） | valgrind 长跑 |
 
 ---
 
@@ -283,105 +264,89 @@ test/integration/c_core/
 
 ---
 
-## 四、Phase 2: 多线程 + 静态文件
+## 四、Phase 2: 多进程架构
 
-**工作量**: 4-5 周（含缓冲）
-**依赖**: Phase 1 完成
-**目标**: 多线程并发 + 静态文件服务
-**量化验收**: 吞吐量 ≥ 5000 req/s，负载均衡偏差 < 10%
+**工作量**: 3-4 周  
+**依赖**: Phase 1 完成  
+**目标**: Master + Worker 多进程架构  
+**量化验收**: 吞吐量 ≥ 5000 req/s，Worker 崩溃恢复 < 3s
 
-### 2.1 ThreadPoolManager + WorkerThread（并行组 A）
+### 2.1 master 模块（并行组 A）
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 2.1.1 | 实现 ThreadPoolManager 类 | P0 | [Phase 1] | - | 待开始 |
-| 2.1.2 | 实现 WorkerThread 类（含 eventfd/pipe 通知） | P0 | [1.2.1] | - | 待开始 |
-| 2.1.3 | 实现 Least-Connections 分发策略（含缓存优化） | P0 | [2.1.1, 2.1.2] | - | 待开始 |
-| 2.1.4 | 实现 Round-Robin 分发策略 | P1 | [2.1.1] | [2.1.3] | 待开始 |
-| 2.1.5 | 实现分发策略切换接口 | P2 | [2.1.3, 2.1.4] | - | 待开始 |
-| 2.1.6 | 编写 ThreadPool 单元测试（≥ 15 用例） | P0 | [2.1.1-5] | - | 待开始 |
-| 2.1.7 | 负载均衡测试（偏差 < 10%） | P0 | [2.1.6] | - | 待开始 |
+| 2.1.1 | 实现 master.h + master.c（进程管理） | P0 | [Phase 1] | - | 待开始 |
+| 2.1.2 | 实现启动 Worker（fork） | P0 | [2.1.1] | - | 待开始 |
+| 2.1.3 | 实现监控 Worker（waitpid） | P0 | [2.1.1, 2.1.2] | - | 待开始 |
+| 2.1.4 | 实现 Worker 崩溃恢复 | P0 | [2.1.3] | - | 待开始 |
+| 2.1.5 | 实现信号处理（SIGINT/SIGTERM/SIGCHLD） | P0 | [2.1.1] | - | 待开始 |
+| 2.1.6 | 编写 master 单元测试（≥ 10 用例） | P0 | [2.1.1-5] | - | 待开始 |
 
-**验收标准**:
-- [ ] N 个 Worker 线程并行工作（可配置）
-- [ ] 连接正确分发到 Worker（无丢失）
-- [ ] Least-Connections 负载均衡偏差 < 10%
-- [ ] 单元测试 ≥ 15 用例全部通过
-- [ ] 覆盖率 ≥ 70%
-- [ ] Valgrind 内存泄漏 = 0
-
-**负载均衡偏差计算公式（补充）**:
-```bash
-# 假设 N 个 Worker，连接数分布为 C[0], C[1], ..., C[N-1]
-# 平均连接数: mean = (C[0] + C[1] + ... + C[N-1]) / N
-# 标准差: std = sqrt(((C[0]-mean)^2 + (C[1]-mean)^2 + ...) / N)
-# 相对偏差: deviation = std / mean
-
-# Python 测试脚本示例：
-import numpy as np
-
-def calculate_deviation(connection_counts):
-    mean = np.mean(connection_counts)
-    std = np.std(connection_counts)
-    deviation = std / mean
-    return deviation
-
-# 验收示例：
-# Worker 连接数: [256, 248, 251, 245]
-# mean = 250, std = 4.3, deviation = 1.7% ✓ (< 10%)
-
-# 测试方法：
-# 1. 运行服务器 4 Worker threads
-# 2. wrk -t4 -c1000 -d30s 发送 1000 并发连接
-# 3. 统计各 Worker 连接数（通过监控接口）
-# 4. 计算偏差，确认 < 10%
+**文件清单**:
+```
+include/master.h
+src/master.c
+test/unit/test_master.c
 ```
 
-**失败处理策略**:
-- 连接丢失 → 检查 eventfd/pipe 通知机制
-- 负载均衡偏差过大 → 检查 Worker 连接计数准确性
+**验收标准**:
+- [ ] N 个 Worker 并行启动
+- [ ] Worker 崩溃自动重启（< 3s）
+- [ ] SIGTERM 平滑关闭
+- [ ] 单元测试 ≥ 10 用例通过
 
 ---
 
-### 2.2 fileserve 模块（并行组 B）
+### 2.2 worker 模块扩展（SO_REUSEPORT）
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 2.2.1 | 实现 fileserve 模块（含路径穿越检测） | P0 | [Phase 1] | [2.1.1] | 待开始 |
-| 2.2.2 | 实现 MIME 类型推断 | P0 | [2.2.1] | - | 待开始 |
-| 2.2.3 | 实现跨平台 sendfile 封装（Linux/macOS） | P0 | [2.2.1] | - | 待开始 |
-| 2.2.4 | 实现 Range 请求支持 | P2 | [2.2.1] | - | 待开始 |
-| 2.2.5 | 编写 fileserve 单元测试（含安全测试） | P0 | [2.2.1-4] | - | 待开始 |
-| 2.2.6 | 路径穿越攻击测试（≥ 20 种模式） | P0 | [2.2.5] | - | 待开始 |
+| 2.2.1 | 实现 SO_REUSEPORT socket 创建 | P0 | [Phase 1] | [2.1.1] | 待开始 |
+| 2.2.2 | 实现多 Worker 并发 accept | P0 | [2.2.1] | - | 待开始 |
+| 2.2.3 | 实现 Worker 信号处理（SIGTERM） | P0 | [2.2.1] | - | 待开始 |
+| 2.2.4 | 实现 Worker 优雅关闭 | P0 | [2.2.3] | - | 待开始 |
+| 2.2.5 | 编写 worker 单元测试 | P0 | [2.2.1-4] | - | 待开始 |
+
+**文件清单**:
+```
+src/worker.c（扩展）
+test/unit/test_worker.c
+```
 
 **验收标准**:
-- [ ] 静态文件正确返回（含各种 MIME 类型）
-- [ ] 路径穿越攻击被拒绝（403 Forbidden）
-- [ ] sendfile 零拷贝生效（Linux/macOS）
-- [ ] Range 请求正确处理（206 Partial Content）
-- [ ] 单元测试 ≥ 15 用例全部通过
-- [ ] 安全测试 ≥ 20 种路径穿越模式全部拒绝
-
-**失败处理策略**:
-- 路径穿越攻击成功 → 紧急修复 realpath 检查逻辑
-- sendfile 不工作 → 检查平台 API 参数
+- [ ] SO_REUSEPORT socket 正常创建
+- [ ] 多 Worker 并发 accept 正常
+- [ ] Worker 优雅关闭不丢连接
+- [ ] 单元测试 ≥ 10 用例通过
 
 ---
 
-### 2.3 router 扩展（前缀匹配）
+### 2.3 进程管理集成测试
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 2.3.1 | 实现 ROUTER_MATCH_PREFIX（前缀匹配算法） | P0 | [1.4.1] | [2.1.1, 2.2.1] | 待开始 |
-| 2.3.2 | 更新 router 单元测试（含前缀匹配测试） | P0 | [2.3.1] | - | 待开始 |
+| 2.3.1 | 创建 examples/production_server.c | P0 | [2.1, 2.2] | - | 待开始 |
+| 2.3.2 | 编写进程管理集成测试 | P0 | [2.3.1] | - | 待开始 |
+| 2.3.3 | Worker 崩溃恢复测试 | P0 | [2.3.2] | - | 待开始 |
+| 2.3.4 | 平滑关闭测试 | P0 | [2.3.2] | - | 待开始 |
+| 2.3.5 | 多 Worker 吞吐量基准 | P0 | [2.3.1] | - | 待开始 |
+
+**文件清单**:
+```
+examples/production_server.c
+test/integration/
+├── test_process_mgmt.c
+├── test_worker_crash.c
+└── test_signal_handling.c
+```
 
 **验收标准**:
-- [ ] 前缀匹配正确（如 `/api/*` 匹配 `/api/users`）
-- [ ] 精确匹配优先级高于前缀匹配
-- [ ] 单元测试 ≥ 10 用例全部通过
+- [ ] 4 Workers 吞吐量 ≥ 5000 req/s
+- [ ] Worker 崩溃恢复 < 3s
+- [ ] 平滑关闭连接不丢失
 
 ---
 
@@ -390,49 +355,42 @@ def calculate_deviation(connection_counts):
 **验收检查清单**:
 | 检查项 | 目标值 | 测试方法 | 通过标准 |
 |--------|--------|----------|----------|
-| 多线程吞吐量 | ≥ 5000 req/s (4 threads) | wrk -t4 -c100 -d10s | 报告确认 |
-| 负载均衡偏差 | < 10% | 各 Worker 连接数统计 | 计算 |
-| 静态文件吞吐量 | ≥ 3000 req/s | wrk 测试 1MB 文件 | 报告确认 |
-| 路径穿越防护 | 100% 拒绝 | 20+ 攻击模式测试 | 全部 403 |
-| 单元测试 | ≥ 40 用例 | ctest | 100% 通过 |
-| 覆盖率 | ≥ 70% | lcov | 报告确认 |
+| 多 Worker 吞吐量 | ≥ 5000 req/s (4 Workers) | wrk -t4 -c100 -d10s | 报告确认 |
+| Worker 崩溃恢复 | < 3s | kill + 监控 | 测量 |
+| 平滑关闭 | 连接不丢失 | curl 测试 | 无错误 |
+| 单元测试 | ≥ 30 用例 | ctest | 100% 通过 |
 | 内存泄漏 | 0 | Valgrind 30min | 0 leaked |
 
 **Phase 2 失败处理**:
-- 多线程吞吐量不达标 → 检查 Worker 数量配置（建议与 CPU 核数匹配），分析 CPU 利用率分布，优化连接分发策略缓存
-- 负载均衡偏差过大 → 检查 Least-Connections 算法实现，验证 worker_connection_count 函数准确性，确认 cached_least_loaded_worker 更新时机
-- 路径穿越攻击漏过 → 紧急修复 realpath 检查逻辑，参考 OWASP 测试指南补充攻击模式（如双重编码、Unicode 转义）
-- 静态文件性能差 → 检查 sendfile 是否生效（strace 验证），调整 chunk_size 参数（默认 1MB），确认文件系统缓存
-- 连接分发丢失 → 检查 eventfd/pipe 通知机制，验证 Worker pending queue 处理逻辑，增加连接分发日志
-- ThreadPool 启动失败 → 检查 pthread_create 错误码，确认线程资源限制（ulimit -u）
-- 内存泄漏 → 定位泄漏位置（Valgrind --leak-check=full），检查 Worker 线程资源清理
+- 多 Worker 吞吐量不达标 → 检查 Worker 数量（建议与 CPU 核数匹配），验证 SO_REUSEPORT 是否生效
+- Worker 崩溃恢复慢 → 检查 waitpid 循环频率，优化 fork 速度
+- 平滑关闭丢连接 → 检查 Worker 关闭流程，确保现有连接处理完成
+- SO_REUSEPORT 不工作 → 验证内核版本（Linux 3.9+），检查 socket 选项设置
+- 内存泄漏 → 定位泄漏位置，检查 fork 后资源清理
 
 ---
 
 ## 五、Phase 3: HTTP/1.1 完整特性
 
-**工作量**: 3-4 周（含缓冲）
-**依赖**: Phase 1 (timer), Phase 2
-**目标**: HTTP/1.1 合规
-**量化验收**: Keep-Alive ≥ 100 并发，chunked 解析正确率 100%
+**工作量**: 2-3 周  
+**依赖**: Phase 1 (timer), Phase 2  
+**目标**: HTTP/1.1 合规  
+**量化验收**: Keep-Alive ≥ 100 并发
 
 ### 3.1 Keep-Alive 实现
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 3.1.1 | 实现 connection_timeout 定时器（依赖 timer） | P0 | [1.2.2] | - | 待开始 |
-| 3.1.2 | 实现 keepalive_timeout 定时器 | P0 | [1.2.2] | [3.1.1] | 待开始 |
-| 3.1.3 | 实现 Connection 持久化状态管理 | P0 | [1.3.1] | [3.1.1, 3.1.2] | 待开始 |
-| 3.1.4 | 编写 Keep-Alive 单元测试（≥ 10 用例） | P0 | [3.1.1-3] | - | 待开始 |
-| 3.1.5 | Keep-Alive 并发测试（≥ 100 并发） | P0 | [3.1.4] | - | 待开始 |
+| 3.1.1 | 实现 connection_timeout 定时器 | P0 | [Phase 2] | - | 待开始 |
+| 3.1.2 | 实现 keepalive_timeout 定时器 | P0 | [Phase 2] | [3.1.1] | 待开始 |
+| 3.1.3 | 实现 Connection 持久化状态管理 | P0 | [3.1.1, 3.1.2] | - | 待开始 |
+| 3.1.4 | 编写 Keep-Alive 单元测试 | P0 | [3.1.1-3] | - | 待开始 |
 
 **验收标准**:
-- [ ] Connection timeout 正确触发（关闭超时连接）
-- [ ] Keepalive timeout 正确触发（关闭空闲连接）
+- [ ] Connection timeout 正确触发
+- [ ] Keepalive timeout 正确触发
 - [ ] Keep-Alive 连接数 ≥ 100 并发
-- [ ] 单元测试 ≥ 10 用例全部通过
-- [ ] Valgrind 内存泄漏 = 0
 
 ---
 
@@ -441,15 +399,9 @@ def calculate_deviation(connection_counts):
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 3.2.1 | 实现 chunked 请求解析 | P0 | [1.3.2] | - | 待开始 |
-| 3.2.2 | 实现 chunked 响应生成 | P0 | [1.3.2] | [3.2.1] | 待开始 |
-| 3.2.3 | 编写 chunked 单元测试（≥ 15 用例，含 malformed） | P0 | [3.2.1-2] | - | 待开始 |
-
-**验收标准**:
-- [ ] chunked 解析正确率 100%（50+ 测试用例）
-- [ ] chunked 响应生成正确（符合 RFC 7230）
-- [ ] malformed chunked 请求正确处理（返回 400）
-- [ ] 单元测试 ≥ 15 用例全部通过
+| 3.2.1 | 实现 chunked 请求解析 | P0 | [Phase 2] | - | 待开始 |
+| 3.2.2 | 实现 chunked 响应生成 | P0 | [3.2.1] | - | 待开始 |
+| 3.2.3 | 编写 chunked 单元测试 | P0 | [3.2.1-2] | - | 待开始 |
 
 ---
 
@@ -458,44 +410,29 @@ def calculate_deviation(connection_counts):
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 3.3.1 | 实现 Host 头必需验证 | P0 | [1.3.2] | - | 待开始 |
-| 3.3.2 | 编写 HTTP/1.1 合规测试套件 | P0 | [3.1-3.3] | - | 待开始 |
-
-**验收标准**:
-- [ ] HTTP/1.1 请求无 Host 头返回 400
-- [ ] 持久连接正确工作（Connection: keep-alive）
-- [ ] chunked 传输正确工作
-- [ ] Range 请求正确工作
-- [ ] 合规测试套件全部通过
+| 3.3.1 | 实现 Host 头必需验证 | P0 | [Phase 2] | - | 待开始 |
+| 3.3.2 | 实现 Range 请求支持 | P1 | [Phase 2] | - | 待开始 |
+| 3.3.3 | 编写 HTTP/1.1 合规测试套件 | P0 | [3.1-3.3] | - | 待开始 |
 
 ---
 
 ### Phase 3 总验收
 
-**验收检查清单**:
-| 检查项 | 目标值 | 测试方法 | 通过标准 |
-|--------|--------|----------|----------|
-| Keep-Alive 并发 | ≥ 100 | curl 并发测试 | 报告确认 |
-| chunked 正确率 | 100% | 50+ 测试用例 | 全部通过 |
-| HTTP/1.1 合规 | 全部通过 | 合规测试套件 | 报告确认 |
-| 单元测试 | ≥ 35 用例 | ctest | 100% 通过 |
-| 覆盖率 | ≥ 70% | lcov | 报告确认 |
-| 内存泄漏 | 0 | Valgrind 30min | 0 leaked |
-
-**Phase 3 失败处理**:
-- chunked 解析失败 → 检查边界条件，参考 RFC 7230 示例测试用例
-- Keep-Alive 连接泄漏 → 检查 connection_close 调用时机，确保所有路径都有清理
-- timeout 定时器不触发 → 检查 timer_heap 是否正确更新，确认 eventloop_run 定时检查
-- Host 头验证失败 → 确认 http_parser_parse 正确提取 Host 头，检查空值处理
-- 合规测试失败 → 回退到对应模块修复，参考 nginx/httpd 实现对比
-- 内存泄漏 → 定位泄漏位置（Valgrind --leak-check=full），检查 Keep-Alive 连接关闭路径
+| 检查项 | 目标值 | 测试方法 |
+|--------|--------|----------|
+| Keep-Alive 并发 | ≥ 100 | curl 并发测试 |
+| HTTP/1.1 合规 | 100% | 合规测试套件 |
+| 单元测试 | ≥ 35 用例 | ctest |
+| 覆盖率 | ≥ 70% | lcov |
 
 ---
 
 ## 六、Phase 4: SSL/TLS + 虚拟主机
 
-**工作量**: 4-5 周（含缓冲）
-**依赖**: Phase 2 (ThreadPool)
+**工作量**: 3-4 周  
+**依赖**: Phase 2  
+**目标**: HTTPS + 多域名  
+**量化验收**: HTTPS 握手延迟 < 50ms
 **目标**: HTTPS + 多域名
 **量化验收**: HTTPS 握手延迟 < 50ms，虚拟主机匹配 100%
 
@@ -869,157 +806,88 @@ export VCPKG_DEFAULT_TRIPLET=x64-linux-openssl3x
 
 ---
 
-## 七、Phase 5: C++ 封装 + 中间件 + 安全
+## 七、Phase 5: 完善功能
 
-**工作量**: 6-8 周（含 35% 缓冲，考虑 C++ 封装复杂性）
-**依赖**: Phase 4
-**目标**: 易用 C++ API + 安全防护
-**量化验收**: 异步中间件延迟 < 5ms，DDoS 防护生效
+**工作量**: 3-4 周  
+**依赖**: Phase 4  
+**目标**: 静态文件 + 安全 + 日志  
+**量化验收**: 静态文件吞吐 ≥ 3000 req/s
 
-### 5.1 C++ API Layer（并行组 A）
+### 5.1 fileserve 模块
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 5.1.1 | 实现 HttpServer 类（封装 C API） | P0 | [Phase 4] | - | 待开始 |
-| 5.1.2 | 实现 Request 类 | P0 | [1.3.2] | [5.1.1] | 待开始 |
-| 5.1.3 | 实现 Response 类 | P0 | [1.3.2] | [5.1.1, 5.1.2] | 待开始 |
-| 5.1.4 | 实现 C++ Router 类（含链式 API） | P0 | [1.4.1] | [5.1.1-3] | 待开始 |
-| 5.1.5 | 实现异常类（HttpException 及子类） | P1 | [1.3.3] | [5.1.1-4] | 待开始 |
-| 5.1.6 | 编写 C++ API 单元测试（≥ 20 用例） | P0 | [5.1.1-5] | - | 待开始 |
+| 5.1.1 | 实现 fileserve 模块（路径穿越检测） | P0 | [Phase 4] | - | 待开始 |
+| 5.1.2 | 实现 MIME 类型推断 | P0 | [5.1.1] | - | 待开始 |
+| 5.1.3 | 实现跨平台 sendfile | P0 | [5.1.1] | - | 待开始 |
+| 5.1.4 | 实现大文件分段传输 | P1 | [5.1.3] | - | 待开始 |
+| 5.1.5 | 编写 fileserve 单元测试 | P0 | [5.1.1-4] | - | 待开始 |
 
 **验收标准**:
-- [ ] HttpServer API 易用（链式调用）
-- [ ] Request/Response 正确封装 C 结构
-- [ ] Router 链式 API 正常工作
-- [ ] 异常正确抛出和捕获
-- [ ] 单元测试 ≥ 20 用例全部通过
+- [ ] 静态文件正确返回
+- [ ] 路径穿越防护生效
+- [ ] sendfile 零拷贝生效
+- [ ] 大文件分段正常
 
 ---
 
-### 5.2 Middleware + 异步支持（并行组 B）
+### 5.2 security 模块（Worker 级实例）
 
 **任务清单**:
 | ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
 |----|------|--------|-----------|--------------|------|
-| 5.2.1 | 实现 Middleware 基类 + MiddlewareChain | P0 | [5.1.1] | - | 待开始 |
-| 5.2.2 | 实现 AsyncMiddleware + 异步唤醒机制 | P0 | [2.1.2] | [5.2.1] | 待开始 |
-| 5.2.3 | 实现 CorsMiddleware | P1 | [5.2.1] | [5.2.2] | 待开始 |
-| 5.2.4 | 实现 LoggerMiddleware | P1 | [5.4.1] | [5.2.3] | 待开始 |
-| 5.2.5 | 实现 RateLimitMiddleware | P1 | [5.3.1] | [5.2.3, 5.2.4] | 待开始 |
-| 5.2.6 | 编写 Middleware 单元测试（含异步测试） | P0 | [5.2.1-5] | - | 待开始 |
-| 5.2.7 | 异步中间件延迟测试（目标 < 5ms） | P0 | [5.2.6] | - | 待开始 |
+| 5.2.1 | 实现 security 模块（Worker 级实例） | P0 | [Phase 4] | [5.1.1] | 待开始 |
+| 5.2.2 | 实现单 IP 连接限制 | P0 | [5.2.1] | - | 待开始 |
+| 5.2.3 | 实现速率限制 | P0 | [5.2.1] | [5.2.2] | 待开始 |
+| 5.2.4 | 实现 Slowloris 检测 | P0 | [5.2.1] | [5.2.3] | 待开始 |
+| 5.2.5 | 编写 security 单元测试 | P0 | [5.2.1-4] | - | 待开始 |
 
 **验收标准**:
-- [ ] MiddlewareChain 正确执行
-- [ ] AsyncMiddleware 异步唤醒正确
-- [ ] 预置中间件正常工作
-- [ ] 异步中间件延迟 < 5ms
-- [ ] 单元测试 ≥ 15 用例全部通过
-
-**异步中间件实现细节补充**:
-```cpp
-// RequestSnapshot 结构（用于异步场景参数拷贝）
-struct RequestSnapshot {
-    std::string path;
-    std::string query;
-    std::map<std::string, std::string> params;
-    std::map<std::string, std::string> headers;
-    std::string body;
-    std::string client_ip;
-    std::string request_id;
-    
-    RequestSnapshot(const Request& req) {
-        path = req.path();
-        query = req.query();
-        body = req.body();
-        client_ip = req.client_ip();
-        // 拷贝关键数据...
-    }
-};
-
-// 异步中间件安全实现模式：
-// 1. 拷贝关键参数（而非引用捕获）
-// 2. 异步结果通过 Worker async_result_queue 传递
-// 3. 回调在 Worker 线程执行（保证线程安全）
-// 4. async_result_queue 容量限制：1000
-// 5. 溢出策略：QUEUE_OVERFLOW_FAIL_FAST（返回 503）
-
-// 实现示例（安全模式）：
-class AsyncDbMiddleware : public AsyncMiddleware {
-public:
-    void handle_async(Request& req, Response& resp,
-                      NextFunc next, AsyncCallback done) override {
-        
-        // 拷贝关键参数（安全）
-        std::string user_id = req.param("id");  // 拷贝
-        std::string request_id = req.header("X-Request-ID");  // 拷贝
-        
-        // 创建 RequestSnapshot（可选，用于复杂场景）
-        auto snapshot = std::make_shared<RequestSnapshot>(req);
-        
-        // 提交异步任务到数据库线程池
-        db_pool_->submit([this, user_id, request_id, snapshot, next, done, worker]() {
-            // 异步查询（使用拷贝的参数）
-            auto result = db_pool_->query(
-                "SELECT * FROM users WHERE id = ?", user_id);
-            
-            // 将结果放入 Worker 的结果队列（线程安全）
-            AsyncResult async_result;
-            async_result.request_id = request_id;
-            async_result.data = result;
-            async_result.done_callback = [next, done]() {
-                next();
-                done();
-            };
-            
-            // 检查队列容量（溢出处理）
-            if (worker->async_result_queue.size() >= 1000) {
-                // FAIL_FAST: 返回 503
-                async_result.error_code = ERR_QUEUE_OVERFLOW;
-                async_result.done_callback = []() {
-                    // 503 响应已在 Worker 线程处理
-                };
-            }
-            
-            worker->async_result_queue.push(std::move(async_result));
-            
-            // 通知 Worker EventLoop 恢复处理
-            worker_notify_async_done(worker);
-        });
-    }
-};
-```
-
----
-
-### 5.3 security 模块（并行组 C）
-
-**任务清单**:
-| ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
-|----|------|--------|-----------|--------------|------|
-| 5.3.1 | 实现 security 模块（含分片锁 IP 哈希表） | P0 | [Phase 4] | [5.1.1, 5.2.1] | 待开始 |
-| 5.3.2 | 实现单 IP 连接限制 | P0 | [5.3.1] | - | 待开始 |
-| 5.3.3 | 实现速率限制（滑动窗口） | P0 | [5.3.1] | [5.3.2] | 待开始 |
-| 5.3.4 | 实现分布式限流（本地计数 + 定期同步） | P0 | [5.3.3] | - | 待开始 |
-| 5.3.5 | 实现 Slowloris 检测 | P0 | [3.1.1] | [5.3.1-4] | 待开始 |
-| 5.3.6 | 编写 security 单元测试（含模拟攻击） | P0 | [5.3.1-5] | - | 待开始 |
-| 5.3.7 | DDoS 防护测试（拒绝超限请求） | P0 | [5.3.6] | - | 待开始 |
-
-**验收标准**:
-- [ ] 分片锁哈希表正确工作（< 100K IP）
+- [ ] Worker 级独立实例
 - [ ] 单 IP 连接限制生效
-- [ ] 速率限制生效（滑动窗口正确）
-- [ ] Slowloris 检测生效（关闭慢速连接）
-- [ ] DDoS 防护生效（拒绝超限请求）
-- [ ] 单元测试 ≥ 20 用例全部通过
+- [ ] 速率限制生效
+- [ ] Slowloris 检测生效
 
-**分片锁哈希表配置补充**:
-```c
-// 默认配置（明确）
-#define MAX_HASH_SHARDS 16        // 固定分片数
-#define MAX_ENTRIES_PER_SHARD 65536  // 每分片最大 IP 数
-#define MAX_TOTAL_IPS (16 * 65536)   // 总计 1M IP
+---
+
+### 5.3 logger 模块
+
+**任务清单**:
+| ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
+|----|------|--------|-----------|--------------|------|
+| 5.3.1 | 实现 logger 模块（Worker 独立日志） | P0 | [Phase 4] | [5.1.1, 5.2.1] | 待开始 |
+| 5.3.2 | 实现日志级别过滤 | P0 | [5.3.1] | - | 待开始 |
+| 5.3.3 | 实现安全审计日志 | P0 | [5.3.1] | [5.3.2] | 待开始 |
+| 5.3.4 | 编写 logger 单元测试 | P0 | [5.3.1-3] | - | 待开始 |
+
+**验收标准**:
+- [ ] Worker 独立日志文件
+- [ ] 日志级别过滤正确
+- [ ] 安全审计日志完整
+
+---
+
+### 5.4 router 扩展
+
+**任务清单**:
+| ID | 任务 | 优先级 | blockedBy | parallelWith | 状态 |
+|----|------|--------|-----------|--------------|------|
+| 5.4.1 | 实现前缀匹配 | P0 | [Phase 4] | - | 待开始 |
+| 5.4.2 | 实现正则匹配 | P1 | [5.4.1] | - | 待开始 |
+| 5.4.3 | 实现优先级排序 | P1 | [5.4.1, 5.4.2] | - | 待开始 |
+
+---
+
+### Phase 5 总验收
+
+| 检查项 | 目标值 | 测试方法 |
+|--------|--------|----------|
+| 静态文件吞吐 | ≥ 3000 req/s | wrk 测试 1MB 文件 |
+| DDoS 防护 | 生效 | 模拟攻击测试 |
+| 路径穿越防护 | 100% 拒绝 | 20+ 攻击模式测试 |
+| 单元测试 | ≥ 50 用例 | ctest |
+| 覆盖率 | ≥ 70% | lcov |
 
 // 适用场景说明：
 // - 默认配置：16 分片，每分片 65536 entries，总计 1M IP
