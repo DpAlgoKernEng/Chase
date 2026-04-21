@@ -66,6 +66,7 @@ Timer *timer_heap_add(TimerHeap *heap, uint64_t timeout_ms,
  * @param heap TimerHeap 指针
  * @param timer Timer 指针
  * @return 0 成功，-1 失败
+ * @note 此函数会释放定时器，调用后 timer 指针无效
  */
 int timer_heap_remove(TimerHeap *heap, Timer *timer);
 
@@ -80,8 +81,17 @@ Timer *timer_heap_peek(TimerHeap *heap);
  * 弹出堆顶定时器
  * @param heap TimerHeap 指针
  * @return Timer 指针，空堆返回 NULL
+ * @note 调用者必须使用 timer_free() 释放返回的定时器
  */
 Timer *timer_heap_pop(TimerHeap *heap);
+
+/**
+ * 释放定时器
+ * @param timer Timer 指针
+ * @note 用于释放 timer_heap_pop() 返回的定时器
+ *       不要用于 heap 中的定时器（使用 timer_heap_remove）
+ */
+void timer_free(Timer *timer);
 
 /**
  * 获取定时器过期时间

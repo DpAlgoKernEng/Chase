@@ -27,10 +27,37 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <limits.h>
+#include <ctype.h>
 
 #ifdef __linux__
 #include <sys/sendfile.h>
 #endif
+
+/* 安全解析 Range 数字，防止溢出 */
+static bool safe_parse_range_num(const char *str, uint64_t max_val, uint64_t *result) {
+    if (!str || !result) return false;
+
+    /* 检查是否全是数字 */
+    for (const char *p = str; *p; p++) {
+        if (!isdigit((unsigned char)*p)) return false;
+    }
+
+    /* 检查长度是否合理（uint64_t 最大 20 位） */
+    size_t len = strlen(str);
+    if (len > 20) return false;
+
+    /* 使用 strtoull 并检查溢出 */
+    char *endptr = NULL;
+    errno = 0;
+    uint64_t val = strtoull(str, &endptr, 10);
+
+    if (endptr == NULL || *endptr != '\0') return false;
+    if (errno == ERANGE) return false;
+    if (val > max_val) return false;
+
+    *result = val;
+    return true;
+}
 
 /* FileServe 结构体 */
 struct FileServe {
@@ -204,26 +231,66 @@ int fileserve_parse_range(const char *range_header, uint64_t file_size, RangeInf
         return -1;
     }
 
-    const char *start_str = range_spec;
-    const char *end_str = dash + 1;
+    /* 提取 start 和 end 字段 */
+    char start_buf[32] = {0};
+    char end_buf[32] = {0};
 
-    /* 后缀范围: "-suffix" 表示最后 suffix 字节（- 在开头）*/
+    /* 后缀范围: "-suffix" 表示最后 suffix 字节 */
     if (dash == range_spec) {
-        if (*end_str == '\0') {
+        /* 后缀范围，无 start */
+        const char *end_str = dash + 1;
+        size_t end_len = strlen(end_str);
+        if (end_len == 0 || end_len >= sizeof(end_buf)) {
             range_info->has_range = false;
             return -1;
         }
-        uint64_t suffix = strtoull(end_str, NULL, 10);
+        memcpy(end_buf, end_str, end_len);
+
+        uint64_t suffix;
+        if (!safe_parse_range_num(end_buf, file_size, &suffix)) {
+            range_info->has_range = false;
+            return -1;
+        }
         range_info->start = (suffix > file_size) ? 0 : (file_size - suffix);
         range_info->end = file_size - 1;
-    } else if (*end_str == '\0') {
+    } else if (*(dash + 1) == '\0') {
         /* 开放范围: "start-" 表示从 start 到文件末尾 */
-        range_info->start = strtoull(start_str, NULL, 10);
+        size_t start_len = dash - range_spec;
+        if (start_len >= sizeof(start_buf)) {
+            range_info->has_range = false;
+            return -1;
+        }
+        memcpy(start_buf, range_spec, start_len);
+
+        uint64_t start;
+        if (!safe_parse_range_num(start_buf, file_size - 1, &start)) {
+            range_info->has_range = false;
+            return -1;
+        }
+        range_info->start = start;
         range_info->end = file_size - 1;
     } else {
         /* 指定范围: "start-end" */
-        range_info->start = strtoull(start_str, NULL, 10);
-        range_info->end = strtoull(end_str, NULL, 10);
+        size_t start_len = dash - range_spec;
+        const char *end_str = dash + 1;
+        size_t end_len = strlen(end_str);
+
+        if (start_len >= sizeof(start_buf) || end_len >= sizeof(end_buf)) {
+            range_info->has_range = false;
+            return -1;
+        }
+
+        memcpy(start_buf, range_spec, start_len);
+        memcpy(end_buf, end_str, end_len);
+
+        uint64_t start, end;
+        if (!safe_parse_range_num(start_buf, file_size - 1, &start) ||
+            !safe_parse_range_num(end_buf, file_size - 1, &end)) {
+            range_info->has_range = false;
+            return -1;
+        }
+        range_info->start = start;
+        range_info->end = end;
     }
 
     /* 验证范围有效性 */

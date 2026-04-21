@@ -35,6 +35,12 @@
     #include <poll.h>
 #endif
 
+/* 最大entries容量限制（防止高fd值内存爆炸） */
+#define MAX_ENTRIES_CAPACITY 65536
+
+/* 默认entries容量 */
+#define DEFAULT_ENTRIES_CAPACITY 1024
+
 /* 事件项结构 */
 typedef struct {
     int fd;
@@ -189,27 +195,37 @@ static int backend_add_kqueue(EventLoop *loop, int fd, uint32_t events) {
 }
 
 static int backend_modify_kqueue(EventLoop *loop, int fd, uint32_t events) {
-    /* kqueue modify 需要先删除再添加 */
-    struct kevent ev[4];
+    /* kqueue EV_ADD 对已存在的 filter 会自动更新，无需先删除 */
+    /* 使用 EV_DISABLE 禁用不需要的事件，比 DELETE+ADD 更高效 */
+    struct kevent ev[2];
     int n = 0;
 
-    /* 删除所有 */
-    EV_SET(&ev[n], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    n++;
-    EV_SET(&ev[n], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    n++;
-
-    /* 添加新的 */
+    /* 设置需要的事件（EV_ADD 会自动更新已存在的 filter） */
     if (events & EV_READ) {
         EV_SET(&ev[n], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
         n++;
-    }
-    if (events & EV_WRITE) {
-        EV_SET(&ev[n], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, NULL);
+    } else {
+        /* 禁用 READ（如果之前存在） */
+        EV_SET(&ev[n], fd, EVFILT_READ, EV_DISABLE, 0, 0, NULL);
         n++;
     }
 
-    return kevent(loop->backend_fd, ev, n, NULL, 0, NULL);
+    if (events & EV_WRITE) {
+        EV_SET(&ev[n], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, NULL);
+        n++;
+    } else {
+        /* 禁用 WRITE（如果之前存在） */
+        EV_SET(&ev[n], fd, EVFILT_WRITE, EV_DISABLE, 0, 0, NULL);
+        n++;
+    }
+
+    /* EV_DISABLE 对不存在的 filter 会失败，忽略 ENOENT */
+    int ret = kevent(loop->backend_fd, ev, n, NULL, 0, NULL);
+    if (ret < 0 && errno == ENOENT) {
+        /* 部分 filter 可能不存在，这是正常的 */
+        return 0;
+    }
+    return ret;
 }
 
 static int backend_remove_kqueue(EventLoop *loop, int fd) {
@@ -245,7 +261,15 @@ static int backend_poll_kqueue(EventLoop *loop, int timeout_ms,
     }
 
     for (int i = 0; i < n; i++) {
-        int fd = (int)events[i].ident;
+        /* kqueue ident 是 uintptr_t，需要检查是否溢出 */
+        uintptr_t raw_fd = events[i].ident;
+
+        /* 检查 fd 值是否在有效范围内 */
+        if (raw_fd > MAX_ENTRIES_CAPACITY) {
+            continue;  /* 跳过异常的高值 fd */
+        }
+
+        int fd = (int)raw_fd;
         uint32_t ev = 0;
         if (events[i].filter == EVFILT_READ) ev |= EV_READ;
         if (events[i].filter == EVFILT_WRITE) ev |= EV_WRITE;
@@ -364,7 +388,7 @@ EventLoop *eventloop_create(int max_events) {
     loop->poll_events = NULL;  /* 初始化为 NULL */
 
     /* 预分配 entries 数组（按 FD 数量） */
-    loop->entries_capacity = 1024;  /* 初始容量 */
+    loop->entries_capacity = DEFAULT_ENTRIES_CAPACITY;
     loop->entries = malloc(loop->entries_capacity * sizeof(EventEntry));
     if (!loop->entries) {
         free(loop);
@@ -415,11 +439,25 @@ int eventloop_add(EventLoop *loop, int fd, uint32_t events,
                   EventCallback cb, void *user_data) {
     if (!loop || fd < 0) return -1;
 
+    /* 检查fd是否超过最大容量限制 */
+    if (fd >= MAX_ENTRIES_CAPACITY) {
+        /* 拒绝过高的fd值，防止内存爆炸 */
+        return -1;
+    }
+
     /* 扩容 entries 数组 */
     if (fd >= loop->entries_capacity) {
         int new_cap = fd + 1;
+        /* 限制最大容量 */
+        if (new_cap > MAX_ENTRIES_CAPACITY) {
+            new_cap = MAX_ENTRIES_CAPACITY;
+        }
         if (new_cap < loop->entries_capacity * 2) {
             new_cap = loop->entries_capacity * 2;
+        }
+        /* 再次检查扩容后是否足够 */
+        if (fd >= new_cap) {
+            return -1;  /* fd值过高，无法容纳 */
         }
         EventEntry *new_entries = realloc(loop->entries, new_cap * sizeof(EventEntry));
         if (!new_entries) return -1;

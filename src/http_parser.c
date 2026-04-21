@@ -20,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
+#include <errno.h>
 
 /* 解析状态（增量状态机） */
 typedef enum {
@@ -37,8 +39,7 @@ typedef enum {
     PARSER_STATE_HEADER_VALUE,   /* 解析头部值 */
     PARSER_STATE_HEADER_CR,      /* 头部值后 CR */
     PARSER_STATE_HEADER_LF,      /* 头部值后 LF */
-    PARSER_STATE_HEADERS_END_CR, /* 空行 CR */
-    PARSER_STATE_HEADERS_END_LF, /* 空行 LF（头部结束） */
+    PARSER_STATE_HEADERS_END_CR, /* 空行 CR（头部结束） */
     PARSER_STATE_BODY,           /* 解析 body */
     PARSER_STATE_COMPLETE        /* 解析完成 */
 } ParserState;
@@ -89,6 +90,48 @@ static HttpMethod parse_method(const char *method, int len) {
     return HTTP_GET;  /* 默认 */
 }
 
+/* 安全解析 Content-Length，防止溢出 */
+static size_t safe_parse_content_length(const char *value, int len) {
+    if (len <= 0 || len > 20) {
+        /* 超过 20 位数字的值不合理，拒绝 */
+        return 0;
+    }
+
+    /* 检查是否全是数字 */
+    for (int i = 0; i < len; i++) {
+        if (!isdigit((unsigned char)value[i])) {
+            return 0;
+        }
+    }
+
+    /* 创建临时 null-terminated 字符串进行解析 */
+    char temp[21];
+    memcpy(temp, value, len);
+    temp[len] = '\0';
+
+    /* 使用 strtoul 并检查溢出 */
+    char *endptr = NULL;
+    errno = 0;
+    unsigned long result = strtoul(temp, &endptr, 10);
+
+    /* 检查解析是否完成 */
+    if (endptr == NULL || *endptr != '\0') {
+        return 0;
+    }
+
+    /* 检查溢出 */
+    if (errno == ERANGE || result > SIZE_MAX) {
+        return 0;
+    }
+
+    /* 设置合理上限（100MB） */
+    if (result > 100 * 1024 * 1024) {
+        return 0;
+    }
+
+    return (size_t)result;
+}
+
 static char *strndup_custom(const char *s, size_t n) {
     if (n == 0) return NULL;
     char *dup = malloc(n + 1);
@@ -98,10 +141,22 @@ static char *strndup_custom(const char *s, size_t n) {
     return dup;
 }
 
-static int append_to_buffer(char **buf, int *len, int *capacity, char c) {
+/* HTTP 头部最大长度限制 */
+#define MAX_HEADER_SIZE     (64 * 1024)   /* 64KB */
+#define MAX_METHOD_SIZE     32
+#define MAX_PATH_SIZE       8192
+#define MAX_QUERY_SIZE      8192
+#define MAX_VERSION_SIZE    16
+
+static int append_to_buffer(char **buf, int *len, int *capacity, char c, int max_size) {
+    if (*len >= max_size) {
+        return -1;  /* 超过最大限制 */
+    }
+
     if (*len >= *capacity) {
         int new_cap = *capacity * 2;
         if (new_cap < 16) new_cap = 16;
+        if (new_cap > max_size) new_cap = max_size;
         char *new_buf = realloc(*buf, new_cap);
         if (!new_buf) return -1;
         *buf = new_buf;
@@ -257,7 +312,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_METHOD_END;
             } else {
                 ret = append_to_buffer(&parser->method_buf, &parser->method_len,
-                                       &parser->method_capacity, c);
+                                       &parser->method_capacity, c, MAX_METHOD_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -282,7 +337,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_PATH_END;
             } else {
                 ret = append_to_buffer(&parser->path_buf, &parser->path_len,
-                                       &parser->path_capacity, c);
+                                       &parser->path_capacity, c, MAX_PATH_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -293,7 +348,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_PATH_END;
             } else {
                 ret = append_to_buffer(&parser->query_buf, &parser->query_len,
-                                       &parser->query_capacity, c);
+                                       &parser->query_capacity, c, MAX_QUERY_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -314,7 +369,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_VERSION_CR;
             } else {
                 ret = append_to_buffer(&parser->version_buf, &parser->version_len,
-                                       &parser->version_capacity, c);
+                                       &parser->version_capacity, c, MAX_VERSION_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -348,7 +403,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_HEADERS_END_CR;
             } else {
                 ret = append_to_buffer(&parser->header_name_buf, &parser->header_name_len,
-                                       &parser->header_name_capacity, c);
+                                       &parser->header_name_capacity, c, MAX_HEADER_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -371,7 +426,7 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 parser->state = PARSER_STATE_HEADER_CR;
             } else {
                 ret = append_to_buffer(&parser->header_value_buf, &parser->header_value_len,
-                                       &parser->header_value_capacity, c);
+                                       &parser->header_value_capacity, c, MAX_HEADER_SIZE);
                 if (ret < 0) return PARSE_ERROR;
             }
             break;
@@ -382,9 +437,10 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                 add_header(req, parser->header_name_buf, parser->header_name_len,
                            parser->header_value_buf, parser->header_value_len);
 
-                /* 检查 Content-Length */
+                /* 检查 Content-Length（使用安全解析） */
                 if (strcasecmp(parser->header_name_buf, "Content-Length") == 0) {
-                    req->content_length = strtoul(parser->header_value_buf, NULL, 10);
+                    req->content_length = safe_parse_content_length(
+                        parser->header_value_buf, parser->header_value_len);
                 }
 
                 parser->state = PARSER_STATE_HEADER_LF;
@@ -409,8 +465,6 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
         case PARSER_STATE_HEADERS_END_CR:
             if (c == '\n') {
                 /* 头部结束 */
-                parser->state = PARSER_STATE_HEADERS_END_LF;
-
                 /* 完成请求行和头部解析 */
                 req->path = strndup_custom(parser->path_buf, parser->path_len);
                 req->query = parser->query_len > 0 ?
@@ -424,16 +478,12 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                     req->body = malloc(req->content_length + 1);
                     if (!req->body) return PARSE_ERROR;
                 } else {
+                    /* 无 body，解析完成 */
                     parser->state = PARSER_STATE_COMPLETE;
                 }
             } else {
                 return PARSE_ERROR;
             }
-            break;
-
-        case PARSER_STATE_HEADERS_END_LF:
-            /* 这个状态只在无 body 时进入，立即完成 */
-            parser->state = PARSER_STATE_COMPLETE;
             break;
 
         case PARSER_STATE_BODY:
@@ -491,11 +541,25 @@ void http_parser_reset(HttpParser *parser) {
 
     parser->state = PARSER_STATE_INIT;
     parser->parsed_len = 0;
+
+    /* 重置长度并清空缓冲区内容 */
     parser->method_len = 0;
+    if (parser->method_buf) parser->method_buf[0] = '\0';
+
     parser->path_len = 0;
+    if (parser->path_buf) parser->path_buf[0] = '\0';
+
     parser->query_len = 0;
+    if (parser->query_buf) parser->query_buf[0] = '\0';
+
     parser->version_len = 0;
+    if (parser->version_buf) parser->version_buf[0] = '\0';
+
     parser->header_name_len = 0;
+    if (parser->header_name_buf) parser->header_name_buf[0] = '\0';
+
     parser->header_value_len = 0;
+    if (parser->header_value_buf) parser->header_value_buf[0] = '\0';
+
     parser->body_received = 0;
 }

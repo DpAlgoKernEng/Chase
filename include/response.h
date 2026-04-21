@@ -105,8 +105,55 @@ int response_build(HttpResponse *resp, char *buf, size_t buf_size);
  * @param resp HttpResponse 指针
  * @param fd socket 文件描述符
  * @return 发送的字节数，-1 表示错误
+ * @note 在非阻塞模式下，如果 socket 缓冲区满（EAGAIN），返回已发送字节数
+ *       调用者应检查返回值是否等于预期长度，如果不是，使用 response_get_pending()
  */
 int response_send(HttpResponse *resp, int fd);
+
+/**
+ * 发送结果状态
+ */
+typedef enum {
+    RESPONSE_SEND_COMPLETE,    /**< 完全发送完成 */
+    RESPONSE_SEND_PARTIAL,     /**< 部分发送，需要继续 */
+    RESPONSE_SEND_ERROR        /**< 发送错误 */
+} ResponseSendStatus;
+
+/**
+ * 发送结果结构体
+ */
+typedef struct {
+    ResponseSendStatus status;  /**< 发送状态 */
+    size_t bytes_sent;          /**< 已发送字节数 */
+    size_t total_bytes;         /**< 总字节数 */
+} ResponseSendResult;
+
+/**
+ * 发送响应（带详细状态）
+ * @param resp HttpResponse 指针
+ * @param fd socket 文件描述符
+ * @return ResponseSendResult 结构体
+ */
+ResponseSendResult response_send_ex(HttpResponse *resp, int fd);
+
+/**
+ * 获取待发送的剩余数据
+ * @param resp HttpResponse 指针
+ * @param offset 输出：已发送的偏移量
+ * @param len 输出：剩余数据长度
+ * @return 剩余数据指针（内部缓冲区，不要释放），NULL 表示无剩余数据
+ */
+const char *response_get_pending(HttpResponse *resp, size_t *offset, size_t *len);
+
+/**
+ * 发送剩余数据
+ * @param resp HttpResponse 指针
+ * @param fd socket 文件描述符
+ * @param offset 从此偏移开始发送
+ * @param len 发送长度
+ * @return 实际发送的字节数，-1 表示错误
+ */
+int response_send_remaining(HttpResponse *resp, int fd, size_t offset, size_t len);
 
 #ifdef __cplusplus
 }

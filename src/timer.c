@@ -22,6 +22,9 @@
 #include <string.h>
 #include <time.h>
 
+/* 定时器数量上限 */
+#define MAX_TIMER_COUNT 1024
+
 /* 获取当前时间（毫秒） */
 static uint64_t get_current_ms(void) {
     struct timespec ts;
@@ -129,9 +132,15 @@ Timer *timer_heap_add(TimerHeap *heap, uint64_t timeout_ms,
                       TimerCallback cb, void *user_data, bool periodic) {
     if (!heap || !cb) return NULL;
 
+    /* 检查数量上限 */
+    if (heap->size >= MAX_TIMER_COUNT) {
+        return NULL;  /* 达到上限 */
+    }
+
     /* 检查容量 */
     if (heap->size >= heap->capacity) {
         int new_cap = heap->capacity * 2;
+        if (new_cap > MAX_TIMER_COUNT) new_cap = MAX_TIMER_COUNT;
         Timer **new_timers = realloc(heap->timers, new_cap * sizeof(Timer *));
         if (!new_timers) return NULL;
         heap->timers = new_timers;
@@ -202,6 +211,11 @@ Timer *timer_heap_pop(TimerHeap *heap) {
     timer->heap_index = -1;
 
     return timer;
+}
+
+void timer_free(Timer *timer) {
+    if (!timer) return;
+    free(timer);
 }
 
 uint64_t timer_get_expire_time(Timer *timer) {

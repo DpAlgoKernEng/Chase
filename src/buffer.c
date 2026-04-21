@@ -189,14 +189,22 @@ void buffer_clear(Buffer *buf) {
 }
 
 const char *buffer_peek(Buffer *buf, size_t *len) {
-    if (!buf || buf->size == 0) {
+    if (!buf || !len) {
+        if (len) *len = 0;
+        return NULL;
+    }
+    if (buf->size == 0) {
         *len = 0;
         return NULL;
     }
 
     /* 返回连续可读的数据长度 */
-    if (buf->tail > buf->head) {
-        /* 连续数据 */
+    /* 特殊情况：满缓冲区时 tail == head，但 size == capacity */
+    if (buf->size == buf->capacity) {
+        /* 满缓冲区，数据可能环绕，返回从 head 到缓冲区末尾的长度 */
+        *len = buf->capacity - buf->head;
+    } else if (buf->tail > buf->head) {
+        /* 连续数据（未环绕） */
         *len = buf->size;
     } else {
         /* 环绕数据，返回第一部分长度 */

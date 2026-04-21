@@ -35,6 +35,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
@@ -49,6 +51,11 @@ typedef struct ConnCtx {
     HttpParser *parser;
     HttpRequest *request;
     Server *server;
+
+    /* 新增：异步响应发送支持 */
+    HttpResponse *pending_response;  /* 待发送的响应 */
+    ResponseSendStatus send_status;  /* 发送状态 */
+    bool response_pending;           /* 是否有待发送响应 */
 } ConnCtx;
 
 /* Server 结构体 */
@@ -58,10 +65,14 @@ struct Server {
     int server_fd;
     Router *router;
     volatile sig_atomic_t running;
+    int signal_pipe[2];         /* 用于信号处理的自管道 */
 };
 
 /* 全局 Server 指针（信号处理需要） */
 static Server *g_server = NULL;
+
+/* 信号处理启用标志（用于安全关闭） */
+static volatile sig_atomic_t g_server_signals_enabled = 0;
 
 /* ========== 连接上下文管理 ========== */
 
@@ -72,6 +83,9 @@ static ConnCtx *connctx_create(Server *server) {
     ctx->parser = http_parser_create();
     ctx->request = http_request_create();
     ctx->server = server;
+    ctx->pending_response = NULL;
+    ctx->send_status = RESPONSE_SEND_COMPLETE;
+    ctx->response_pending = false;
 
     if (!ctx->parser || !ctx->request) {
         http_parser_destroy(ctx->parser);
@@ -88,6 +102,13 @@ static void connctx_destroy(ConnCtx *ctx) {
 
     http_parser_destroy(ctx->parser);
     http_request_destroy(ctx->request);
+
+    /* 清理待发送响应 */
+    if (ctx->pending_response) {
+        response_destroy(ctx->pending_response);
+        ctx->pending_response = NULL;
+    }
+
     free(ctx);
 }
 
@@ -100,15 +121,32 @@ static void on_connection_close(int fd, void *user_data) {
     }
 }
 
+/* ========== 信号管道读回调 ========== */
+
+static void on_signal_pipe_read(int fd, uint32_t events, void *user_data) {
+    Server *server = (Server *)user_data;
+    (void)events;  /* unused */
+
+    char ch;
+    while (read(fd, &ch, 1) > 0) {
+        /* 收到信号通知，停止服务器 */
+        server->running = 0;
+        if (server->loop) {
+            eventloop_stop(server->loop);
+        }
+    }
+}
+
 /* ========== HTTP 请求处理 ========== */
 
-static void handle_http_request(Server *server, ConnCtx *ctx, int client_fd) {
+/**
+ * 处理 HTTP 请求并返回响应（不立即发送）
+ * @return HttpResponse 指针，需要调用者管理生命周期
+ */
+static HttpResponse *build_http_response(Server *server, ConnCtx *ctx) {
     HttpResponse *resp = response_create(HTTP_STATUS_OK);
     if (!resp) {
-        /* 无法创建响应，发送简单错误 */
-        const char *error_resp = "HTTP/1.1 500 Internal Error\r\nContent-Length: 0\r\n\r\n";
-        write(client_fd, error_resp, strlen(error_resp));
-        return;
+        return NULL;
     }
 
     /* 路由匹配 */
@@ -123,10 +161,77 @@ static void handle_http_request(Server *server, ConnCtx *ctx, int client_fd) {
         response_set_body_html(resp, "<h1>404 Not Found</h1>", 22);
     }
 
-    /* 发送响应 */
-    response_send(resp, client_fd);
+    return resp;
+}
 
-    response_destroy(resp);
+/* ========== 写回调（处理异步发送） ========== */
+
+static void on_connection_write(int fd, uint32_t events, void *user_data) {
+    ConnCtx *ctx = (ConnCtx *)user_data;
+    Server *server = ctx->server;
+
+    if (events & EV_WRITE) {
+        if (!ctx->response_pending || !ctx->pending_response) {
+            /* 无待发送数据，移除写事件 */
+            eventloop_modify(server->loop, fd, EV_READ);
+            return;
+        }
+
+        /* 继续发送剩余数据 */
+        size_t offset, len;
+        const char *remaining = response_get_pending(ctx->pending_response, &offset, &len);
+
+        if (remaining && len > 0) {
+            ssize_t sent = write(fd, remaining, len);
+            if (sent < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    /* 继续等待下次写机会 */
+                    return;
+                }
+                /* 发送错误，关闭连接 */
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+                return;
+            }
+
+            /* 检查是否发送完成 */
+            if ((size_t)sent >= len) {
+                /* 发送完成 */
+                ctx->response_pending = false;
+                response_destroy(ctx->pending_response);
+                ctx->pending_response = NULL;
+
+                /* 移除写事件，关闭连接（不支持 Keep-Alive） */
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+            } else {
+                /* 部分发送，更新状态并继续等待 */
+                /* response_get_pending 返回的是相对于当前发送位置的指针 */
+                /* 我们需要通过 response_send_remaining 或内部更新来处理 */
+                /* 由于我们已经发送了 sent 字节，需要更新 pending_response 的内部状态 */
+                /* 这里通过 response_send_remaining 来完成更新 */
+                response_send_remaining(ctx->pending_response, fd, offset + sent, len - sent);
+            }
+        } else {
+            /* 无剩余数据，发送完成 */
+            ctx->response_pending = false;
+            if (ctx->pending_response) {
+                response_destroy(ctx->pending_response);
+                ctx->pending_response = NULL;
+            }
+            eventloop_remove(server->loop, fd);
+            close(fd);
+            connctx_destroy(ctx);
+        }
+    }
+
+    if (events & EV_ERROR || events & EV_CLOSE) {
+        eventloop_remove(server->loop, fd);
+        close(fd);
+        connctx_destroy(ctx);
+    }
 }
 
 /* ========== 读回调 ========== */
@@ -158,23 +263,65 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
         ParseResult result = http_parser_parse(ctx->parser, ctx->request, buffer, n, &consumed);
 
         if (result == PARSE_COMPLETE) {
-            /* 请求解析完成，处理请求 */
-            handle_http_request(server, ctx, fd);
+            /* 请求解析完成，构建响应 */
+            HttpResponse *resp = build_http_response(server, ctx);
+            if (!resp) {
+                /* 无法创建响应，发送简单错误 */
+                const char *error_resp = "HTTP/1.1 500 Internal Error\r\nContent-Length: 0\r\n\r\n";
+                write(fd, error_resp, strlen(error_resp));
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+                return;
+            }
 
-            /* 关闭连接（简单服务器，不支持 Keep-Alive） */
-            eventloop_remove(server->loop, fd);
-            close(fd);
-            connctx_destroy(ctx);
+            /* 使用扩展发送函数 */
+            ResponseSendResult send_result = response_send_ex(resp, fd);
+
+            if (send_result.status == RESPONSE_SEND_COMPLETE) {
+                /* 完全发送完成，关闭连接 */
+                response_destroy(resp);
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+            } else if (send_result.status == RESPONSE_SEND_PARTIAL) {
+                /* 部分发送，保存响应并注册写事件 */
+                ctx->pending_response = resp;
+                ctx->response_pending = true;
+                ctx->send_status = RESPONSE_SEND_PARTIAL;
+
+                /* 注册写事件回调 */
+                eventloop_modify(server->loop, fd, EV_WRITE);
+            } else {
+                /* 发送错误 */
+                response_destroy(resp);
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+            }
         } else if (result == PARSE_ERROR) {
             /* 解析错误 */
             HttpResponse *resp = response_create(HTTP_STATUS_BAD_REQUEST);
             response_set_body_html(resp, "<h1>400 Bad Request</h1>", 22);
-            response_send(resp, fd);
-            response_destroy(resp);
 
-            eventloop_remove(server->loop, fd);
-            close(fd);
-            connctx_destroy(ctx);
+            ResponseSendResult send_result = response_send_ex(resp, fd);
+
+            if (send_result.status == RESPONSE_SEND_COMPLETE) {
+                response_destroy(resp);
+            } else if (send_result.status == RESPONSE_SEND_PARTIAL) {
+                ctx->pending_response = resp;
+                ctx->response_pending = true;
+                eventloop_modify(server->loop, fd, EV_WRITE);
+            } else {
+                response_destroy(resp);
+            }
+
+            /* 如果发送完成或错误，关闭连接 */
+            if (send_result.status != RESPONSE_SEND_PARTIAL) {
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+            }
         }
         /* PARSE_NEED_MORE: 继续等待更多数据 */
     }
@@ -220,21 +367,19 @@ static void on_accept(int fd, uint32_t events, void *user_data) {
     }
 }
 
-/* ========== Server 信号处理 ========== */
+/* ========== Server 信号处理（仅设置标志，使用self-pipe） ========== */
 
 static void server_signal_handler(int sig) {
+    /* 先检查信号处理是否已禁用 */
+    if (g_server_signals_enabled == 0) return;
     if (g_server == NULL) return;
 
-    switch (sig) {
-        case SIGINT:
-        case SIGTERM:
-            g_server->running = 0;
-            if (g_server->loop) {
-                eventloop_stop(g_server->loop);
-            }
-            break;
-        default:
-            break;
+    /* 信号处理函数中只做最小操作：写入pipe通知主循环 */
+    /* 这符合async-signal-safe要求 */
+    char ch = sig;
+    /* write是async-signal-safe函数 */
+    if (g_server->signal_pipe[1] >= 0) {
+        write(g_server->signal_pipe[1], &ch, 1);
     }
 }
 
@@ -251,6 +396,9 @@ static int install_signal_handlers(void) {
     /* 忽略 SIGPIPE */
     signal(SIGPIPE, SIG_IGN);
 
+    /* 启用信号处理 */
+    g_server_signals_enabled = 1;
+
     return 0;
 }
 
@@ -266,12 +414,29 @@ Server *server_create(const ServerConfig *config) {
     memcpy(&server->config, config, sizeof(ServerConfig));
     server->running = 1;
 
+    /* 初始化signal_pipe */
+    server->signal_pipe[0] = -1;
+    server->signal_pipe[1] = -1;
+    if (pipe(server->signal_pipe) < 0) {
+        perror("pipe");
+        free(server);
+        return NULL;
+    }
+
+    /* 设置管道非阻塞 */
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(server->signal_pipe[i], F_GETFL, 0);
+        fcntl(server->signal_pipe[i], F_SETFL, flags | O_NONBLOCK);
+    }
+
     /* 使用传入的 Router 或创建默认 Router */
     if (config->router) {
         server->router = config->router;
     } else {
         server->router = router_create();
         if (!server->router) {
+            close(server->signal_pipe[0]);
+            close(server->signal_pipe[1]);
             free(server);
             return NULL;
         }
@@ -288,6 +453,8 @@ Server *server_create(const ServerConfig *config) {
     server->server_fd = socket_create_server(config->port, config->bind_addr, &sock_opts);
 
     if (server->server_fd < 0) {
+        close(server->signal_pipe[0]);
+        close(server->signal_pipe[1]);
         if (!config->router) {
             router_destroy(server->router);
         }
@@ -300,6 +467,8 @@ Server *server_create(const ServerConfig *config) {
     server->loop = eventloop_create(max_conn);
     if (!server->loop) {
         socket_close(server->server_fd);
+        close(server->signal_pipe[0]);
+        close(server->signal_pipe[1]);
         if (!config->router) {
             router_destroy(server->router);
         }
@@ -309,6 +478,9 @@ Server *server_create(const ServerConfig *config) {
 
     /* 注册 Accept 回调 */
     eventloop_add(server->loop, server->server_fd, EV_READ, on_accept, server);
+
+    /* 注册信号管道读端回调（用于安全处理信号） */
+    eventloop_add(server->loop, server->signal_pipe[0], EV_READ, on_signal_pipe_read, server);
 
     /* 设置全局指针 */
     g_server = server;
@@ -323,6 +495,16 @@ Server *server_create(const ServerConfig *config) {
 void server_destroy(Server *server) {
     if (!server) return;
 
+    /* 先禁用信号处理 */
+    g_server_signals_enabled = 0;
+
+    /* 阻塞相关信号，防止在销毁过程中收到信号 */
+    sigset_t mask, old_mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    sigprocmask(SIG_BLOCK, &mask, &old_mask);
+
     g_server = NULL;
 
     if (server->loop) {
@@ -333,12 +515,19 @@ void server_destroy(Server *server) {
         socket_close(server->server_fd);
     }
 
+    /* 关闭信号管道 */
+    if (server->signal_pipe[0] >= 0) close(server->signal_pipe[0]);
+    if (server->signal_pipe[1] >= 0) close(server->signal_pipe[1]);
+
     /* 只销毁自己创建的 Router */
     if (!server->config.router && server->router) {
         router_destroy(server->router);
     }
 
     free(server);
+
+    /* 恢复信号屏蔽 */
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
 }
 
 int server_run(Server *server) {

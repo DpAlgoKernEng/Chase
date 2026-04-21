@@ -32,44 +32,6 @@ struct Worker {
     WorkerConfig config;
 };
 
-/* 全局 Worker 指针（信号处理需要） */
-static Worker *g_worker = NULL;
-
-/* ========== Worker 信号处理 ========== */
-
-static void worker_signal_handler(int sig) {
-    if (g_worker == NULL) return;
-
-    switch (sig) {
-        case SIGINT:
-        case SIGTERM:
-            g_worker->config.running = 0;
-            /* 停止 Server */
-            if (g_worker->config.server) {
-                server_stop(g_worker->config.server);
-            }
-            break;
-        default:
-            break;
-    }
-}
-
-static int install_worker_signal_handlers(void) {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = worker_signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-
-    if (sigaction(SIGINT, &sa, NULL) < 0) return -1;
-    if (sigaction(SIGTERM, &sa, NULL) < 0) return -1;
-
-    /* 忽略 SIGPIPE */
-    signal(SIGPIPE, SIG_IGN);
-
-    return 0;
-}
-
 /* ========== API 实现 ========== */
 
 Worker *worker_create(const WorkerConfig *config) {
@@ -81,9 +43,6 @@ Worker *worker_create(const WorkerConfig *config) {
     memcpy(&worker->config, config, sizeof(WorkerConfig));
     worker->config.running = 1;
 
-    /* 设置全局指针 */
-    g_worker = worker;
-
     printf("[Worker %d] Created (pid=%d)\n",
            config->worker_id, getpid());
 
@@ -93,8 +52,6 @@ Worker *worker_create(const WorkerConfig *config) {
 void worker_destroy(Worker *worker) {
     if (!worker) return;
 
-    g_worker = NULL;
-
     printf("[Worker %d] Destroyed\n", worker->config.worker_id);
 
     free(worker);
@@ -103,17 +60,10 @@ void worker_destroy(Worker *worker) {
 int worker_run(Worker *worker) {
     if (!worker) return -1;
 
-    /* 安装信号处理器 */
-    if (install_worker_signal_handlers() < 0) {
-        fprintf(stderr, "[Worker %d] Failed to install signal handlers\n",
-                worker->config.worker_id);
-        return -1;
-    }
-
     printf("[Worker %d] Running (pid=%d)\n",
            worker->config.worker_id, getpid());
 
-    /* 运行 Server */
+    /* 运行 Server（Server 内部有完整的信号处理机制） */
     int result = server_run(worker->config.server);
 
     printf("[Worker %d] Exited (result=%d)\n",

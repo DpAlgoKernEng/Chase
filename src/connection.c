@@ -129,21 +129,22 @@ int connection_write(Connection *conn) {
     size_t avail = buffer_available(conn->write_buf);
     if (avail == 0) return 0;
 
-    char temp[4096];
-    int to_read = avail > sizeof(temp) ? sizeof(temp) : avail;
-    int n = buffer_read(conn->write_buf, temp, to_read);
+    /* 使用 peek 获取连续数据指针，避免复制 */
+    size_t peek_len = 0;
+    const char *peek_data = buffer_peek(conn->write_buf, &peek_len);
+    if (!peek_data || peek_len == 0) return 0;
 
-    if (n <= 0) return -1;
-
-    ssize_t written = write(conn->fd, temp, n);
+    /* 只尝试写入 peek_len（连续部分） */
+    ssize_t written = write(conn->fd, peek_data, peek_len);
     if (written < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            /* 重新放回缓冲区 */
-            buffer_write(conn->write_buf, temp, n);
-            return 0;
+            return 0;  /* 等待下次写机会 */
         }
-        return -1;
+        return -1;  /* 连接错误 */
     }
+
+    /* 成功写入，跳过已发送的数据 */
+    buffer_skip(conn->write_buf, written);
 
     return (int)written;
 }
@@ -156,6 +157,12 @@ void connection_close(Connection *conn) {
     /* 调用关闭回调（如果设置） */
     if (conn->on_close) {
         conn->on_close(conn->fd, conn->close_user_data);
+    }
+
+    /* 关闭 fd */
+    if (conn->fd >= 0) {
+        close(conn->fd);
+        conn->fd = -1;
     }
 
     connection_set_state(conn, CONN_STATE_CLOSED);

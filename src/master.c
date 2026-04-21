@@ -48,8 +48,13 @@ struct Master {
 /* 全局 Master 指针（信号处理需要） */
 static Master *g_master = NULL;
 
+/* 信号处理启用标志（用于安全关闭） */
+static volatile sig_atomic_t g_master_signals_enabled = 0;
+
 /* 信号处理函数 */
 static void master_signal_handler(int sig) {
+    /* 先检查信号处理是否已禁用 */
+    if (g_master_signals_enabled == 0) return;
     if (g_master == NULL) return;
 
     switch (sig) {
@@ -60,14 +65,18 @@ static void master_signal_handler(int sig) {
             /* 写入信号管道，唤醒主循环 */
             if (g_master->signal_pipe[1] >= 0) {
                 char ch = sig;
-                write(g_master->signal_pipe[1], &ch, 1);
+                /* write 是 async-signal-safe，但可能失败（pipe 满） */
+                /* 在非阻塞模式下失败时信号丢失，这是可接受的 */
+                ssize_t ret = write(g_master->signal_pipe[1], &ch, 1);
+                (void)ret;  /* 忽略返回值，信号处理函数中不能做更多操作 */
             }
             break;
         case SIGCHLD:
             /* Worker 状态变化 */
             if (g_master->signal_pipe[1] >= 0) {
                 char ch = SIGCHLD;
-                write(g_master->signal_pipe[1], &ch, 1);
+                ssize_t ret = write(g_master->signal_pipe[1], &ch, 1);
+                (void)ret;
             }
             break;
         default:
@@ -89,6 +98,9 @@ static int install_signal_handlers(void) {
 
     /* 忽略 SIGPIPE */
     signal(SIGPIPE, SIG_IGN);
+
+    /* 启用信号处理 */
+    g_master_signals_enabled = 1;
 
     return 0;
 }
@@ -170,7 +182,15 @@ static pid_t spawn_worker(Master *master, int worker_id) {
     }
 
     if (pid == 0) {
-        /* 子进程（Worker） - 重置信号处理器 */
+        /* 子进程（Worker） - 关闭继承的父进程 pipe */
+        if (master->signal_pipe[0] >= 0) {
+            close(master->signal_pipe[0]);
+        }
+        if (master->signal_pipe[1] >= 0) {
+            close(master->signal_pipe[1]);
+        }
+
+        /* 重置信号处理器 */
         reset_worker_signal_handlers();
 
         int ret;
@@ -253,10 +273,14 @@ static void check_and_restart_workers(Master *master) {
                 continue;
             }
 
-            /* 检查重启延迟 */
+            /* 检查重启延迟（使用秒级比较，但基于毫秒延迟值） */
             time_t now = time(NULL);
+            time_t delay_seconds = master->restart_delay_ms / 1000;
+            if (master->restart_delay_ms > 0 && delay_seconds == 0) {
+                delay_seconds = 1;  /* 最小延迟 1 秒 */
+            }
             if (wi->last_crash_time > 0 &&
-                (now - wi->last_crash_time) < (master->restart_delay_ms / 1000)) {
+                (now - wi->last_crash_time) < delay_seconds) {
                 continue;  /* 延迟未到 */
             }
 
@@ -319,6 +343,17 @@ Master *master_create(const MasterConfig *config) {
 void master_destroy(Master *master) {
     if (master == NULL) return;
 
+    /* 先禁用信号处理 */
+    g_master_signals_enabled = 0;
+
+    /* 阻塞相关信号，防止在销毁过程中收到信号 */
+    sigset_t mask, old_mask;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGINT);
+    sigaddset(&mask, SIGTERM);
+    sigaddset(&mask, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &mask, &old_mask);
+
     g_master = NULL;
 
     /* 关闭信号管道 */
@@ -330,6 +365,9 @@ void master_destroy(Master *master) {
 
     free(master->workers);
     free(master);
+
+    /* 恢复信号屏蔽 */
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
 }
 
 int master_start_workers(Master *master) {
@@ -391,10 +429,15 @@ int master_stop_workers(Master *master, int timeout_ms) {
     if (deadline <= 0) {
         for (int i = 0; i < master->worker_count; i++) {
             WorkerInfo *wi = &master->workers[i];
-            if (wi->state == WORKER_STATE_STOPPING && wi->pid > 0) {
+            if ((wi->state == WORKER_STATE_RUNNING ||
+                 wi->state == WORKER_STATE_STOPPING) && wi->pid > 0) {
                 printf("[Master] Force killing Worker %d (pid=%d)\n", i, wi->pid);
                 kill(wi->pid, SIGKILL);
+                /* 等待进程退出，避免僵尸进程 */
+                int status;
+                waitpid(wi->pid, &status, 0);
                 wi->state = WORKER_STATE_STOPPED;
+                wi->pid = 0;  /* 清除 pid，避免后续误操作 */
             }
         }
     }
@@ -414,9 +457,30 @@ int master_restart_worker(Master *master, int worker_id) {
         kill(wi->pid, SIGTERM);
         wi->state = WORKER_STATE_STOPPING;
 
-        /* 等待退出 */
+        /* 等待退出（带超时） */
+        int timeout_ms = 5000;  /* 5秒超时 */
+        int elapsed = 0;
         int status;
-        waitpid(wi->pid, &status, 0);
+        while (elapsed < timeout_ms) {
+            pid_t ret = waitpid(wi->pid, &status, WNOHANG);
+            if (ret > 0) {
+                /* Worker 已退出 */
+                wi->state = WORKER_STATE_STOPPED;
+                wi->pid = 0;
+                break;
+            }
+            usleep(100000);  /* 100ms */
+            elapsed += 100;
+        }
+
+        /* 超时则强制杀死 */
+        if (elapsed >= timeout_ms && wi->pid > 0) {
+            printf("[Master] Worker %d timeout, force killing\n", worker_id);
+            kill(wi->pid, SIGKILL);
+            waitpid(wi->pid, &status, 0);
+            wi->state = WORKER_STATE_STOPPED;
+            wi->pid = 0;
+        }
     }
 
     /* 重新启动 */
