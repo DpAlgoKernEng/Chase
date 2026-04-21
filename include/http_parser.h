@@ -1,3 +1,22 @@
+/**
+ * @file    http_parser.h
+ * @brief   HTTP/1.1 请求解析器，增量式状态机实现
+ *
+ * @details
+ *          - 增量解析，支持流式输入
+ *          - 状态机驱动，解析与 I/O 解耦
+ *          - 支持 GET/POST/PUT/DELETE/HEAD/OPTIONS/PATCH
+ *          - 解析请求行、头部、响应体
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  server, handler, router
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_HTTP_PARSER_H
 #define CHASE_HTTP_PARSER_H
 

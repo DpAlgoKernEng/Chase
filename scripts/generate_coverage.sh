@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# @file    generate_coverage.sh
+# @brief   代码覆盖率报告生成脚本
+#
+# @details
+#          - macOS: 使用 LLVM coverage tools (llvm-profdata, llvm-cov)
+#          - Linux: 使用 lcov + genhtml
+#          - 生成 HTML 和文本格式报告
+#          - 需要先启用 ENABLE_COVERAGE=ON 构建并运行测试
+#
+# @layer   Script
+#
+# @depends cmake, 测试框架
+# @usedby  开发者
+#
+# @author  minghui.liu
+# @date    2026-04-21
+#
+
 # Coverage report generation script
 # Usage: ./scripts/generate_coverage.sh
 

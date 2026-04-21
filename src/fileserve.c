@@ -1,4 +1,23 @@
+/**
+ * @file    fileserve.c
+ * @brief   静态文件服务实现
+ *
+ * @details
+ *          - 路径验证防止路径穿越
+ *          - Linux sendfile 零拷贝
+ *          - 支持 Range 请求
+ *
+ * @layer   Core Layer
+ *
+ * @depends mime, error
+ * @usedby  handler, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "fileserve.h"
+#include "mime.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -13,87 +32,12 @@
 #include <sys/sendfile.h>
 #endif
 
-/* ========== MIME 类型映射 ========== */
-
-typedef struct {
-    const char *extension;
-    const char *mime_type;
-} MimeMapping;
-
-/* 默认 MIME 类型映射表 */
-static const MimeMapping default_mime_types[] = {
-    {".html",  MIME_TEXT_HTML},
-    {".htm",   MIME_TEXT_HTML},
-    {".css",   MIME_TEXT_CSS},
-    {".js",    MIME_TEXT_JS},
-    {".json",  MIME_TEXT_JSON},
-    {".txt",   MIME_TEXT_PLAIN},
-    {".xml",   "application/xml"},
-    {".jpg",   MIME_IMAGE_JPEG},
-    {".jpeg",  MIME_IMAGE_JPEG},
-    {".png",   MIME_IMAGE_PNG},
-    {".gif",   MIME_IMAGE_GIF},
-    {".svg",   MIME_IMAGE_SVG},
-    {".ico",   "image/x-icon"},
-    {".mp4",   MIME_VIDEO_MP4},
-    {".webm",  "video/webm"},
-    {".mp3",   MIME_AUDIO_MP3},
-    {".wav",   "audio/wav"},
-    {".pdf",   MIME_APP_PDF},
-    {".zip",   MIME_APP_ZIP},
-    {".gz",    "application/gzip"},
-    {".tar",   "application/x-tar"},
-    {".doc",   "application/msword"},
-    {".docx",  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
-    {".xls",   "application/vnd.ms-excel"},
-    {".xlsx",  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-    {".ppt",   "application/vnd.ms-powerpoint"},
-    {".pptx",  "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
-    {".woff",  "font/woff"},
-    {".woff2", "font/woff2"},
-    {".ttf",   "font/ttf"},
-    {".eot",   "application/vnd.ms-fontobject"},
-    {NULL, NULL}  /* 终止符 */
-};
-
-/* 自定义 MIME 类型映射链表节点 */
-typedef struct CustomMimeNode {
-    char *extension;
-    char *mime_type;
-    struct CustomMimeNode *next;
-} CustomMimeNode;
-
-/* ========== FileServe 结构体 ========== */
-
+/* FileServe 结构体 */
 struct FileServe {
     char *root_dir;                     /* 根目录 */
     size_t root_dir_len;                /* 根目录长度 */
-    CustomMimeNode *custom_mime_head;   /* 自定义 MIME 类型链表 */
+    MimeRegistry *mime_registry;        /* MIME 注册表 */
 };
-
-/* ========== 辅助函数 ========== */
-
-/* 查找扩展名对应的 MIME 类型 */
-static const char *find_mime_type(FileServe *fs, const char *extension) {
-    /* 先查找自定义映射 */
-    CustomMimeNode *node = fs->custom_mime_head;
-    while (node) {
-        if (strcmp(node->extension, extension) == 0) {
-            return node->mime_type;
-        }
-        node = node->next;
-    }
-
-    /* 查找默认映射 */
-    for (int i = 0; default_mime_types[i].extension != NULL; i++) {
-        if (strcmp(default_mime_types[i].extension, extension) == 0) {
-            return default_mime_types[i].mime_type;
-        }
-    }
-
-    /* 默认类型 */
-    return MIME_APP_OCTET;
-}
 
 /* ========== API 实现 ========== */
 
@@ -110,7 +54,12 @@ FileServe *fileserve_create(const char *root_dir) {
 
     fs->root_dir = real_root;
     fs->root_dir_len = strlen(real_root);
-    fs->custom_mime_head = NULL;
+    fs->mime_registry = mime_registry_create();
+    if (!fs->mime_registry) {
+        free(fs->root_dir);
+        free(fs);
+        return NULL;
+    }
 
     return fs;
 }
@@ -119,17 +68,7 @@ void fileserve_destroy(FileServe *fs) {
     if (!fs) return;
 
     free(fs->root_dir);
-
-    /* 释放自定义 MIME 类型链表 */
-    CustomMimeNode *node = fs->custom_mime_head;
-    while (node) {
-        CustomMimeNode *next = node->next;
-        free(node->extension);
-        free(node->mime_type);
-        free(node);
-        node = next;
-    }
-
+    mime_registry_destroy(fs->mime_registry);
     free(fs);
 }
 
@@ -241,30 +180,9 @@ FileServeResult fileserve_get_file_info(FileServe *fs, const char *path, FileInf
     info->is_readable = (st.st_mode & S_IRUSR) != 0;
 
     /* 推断 MIME 类型 */
-    const char *ext = strrchr(path, '.');
-    if (ext) {
-        info->mime.type = find_mime_type(fs, ext);
-        info->mime.charset = NULL;
-    } else {
-        info->mime.type = MIME_APP_OCTET;
-        info->mime.charset = NULL;
-    }
+    info->mime = mime_registry_get_type_from_path(fs->mime_registry, path);
 
     return FILESERVE_OK;
-}
-
-MimeType fileserve_get_mime_type(const char *path) {
-    MimeType result = {MIME_APP_OCTET, NULL};
-
-    if (!path) return result;
-
-    /* 查找扩展名 */
-    const char *ext = strrchr(path, '.');
-    if (!ext) return result;
-
-    /* 返回默认 MIME 类型结果，实际查找需要 FileServe 对象 */
-    result.type = MIME_APP_OCTET;
-    return result;
 }
 
 int fileserve_parse_range(const char *range_header, uint64_t file_size, RangeInfo *range_info) {
@@ -452,21 +370,5 @@ FileServeResult fileserve_read_file(FileServe *fs, const char *path,
 
 int fileserve_add_mime_type(FileServe *fs, const char *extension, const char *mime_type) {
     if (!fs || !extension || !mime_type) return -1;
-
-    CustomMimeNode *node = malloc(sizeof(CustomMimeNode));
-    if (!node) return -1;
-
-    node->extension = strdup(extension);
-    node->mime_type = strdup(mime_type);
-    if (!node->extension || !node->mime_type) {
-        free(node->extension);
-        free(node->mime_type);
-        free(node);
-        return -1;
-    }
-
-    node->next = fs->custom_mime_head;
-    fs->custom_mime_head = node;
-
-    return 0;
+    return mime_registry_add_type(fs->mime_registry, extension, mime_type);
 }

@@ -40,25 +40,39 @@ endif()
 set(CHASE_CORE_HEADERS
     include/eventloop.h
     include/timer.h
+    include/buffer.h
+    include/socket.h
     include/connection.h
     include/http_parser.h
     include/router.h
     include/error.h
-    include/thread_pool_manager.h
+    include/mime.h
     include/fileserve.h
     include/connection_pool.h
+    include/master.h
+    include/worker.h
+    include/response.h
+    include/handler.h
+    include/server.h
 )
 
 set(CHASE_CORE_SOURCES
     src/eventloop.c
     src/timer.c
+    src/buffer.c
+    src/socket.c
     src/connection.c
     src/http_parser.c
     src/router.c
     src/error.c
-    src/thread_pool_manager.c
+    src/mime.c
     src/fileserve.c
     src/connection_pool.c
+    src/master.c
+    src/worker.c
+    src/response.c
+    src/handler.c
+    src/server.c
 )
 
 # 创建核心库

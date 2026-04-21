@@ -1,3 +1,22 @@
+/**
+ * @file    test_http_parser.c
+ * @brief   HTTP Parser 模块测试
+ *
+ * @details
+ *          - 测试 HTTP 请求解析
+ *          - 测试各种 HTTP 方法
+ *          - 测试请求头解析
+ *          - 测试增量解析
+ *
+ * @layer   Test
+ *
+ * @depends http_parser, eventloop, router, connection, error
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "http_parser.h"
 #include <stdio.h>
 #include <stdlib.h>

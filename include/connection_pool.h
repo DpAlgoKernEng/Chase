@@ -1,3 +1,22 @@
+/**
+ * @file    connection_pool.h
+ * @brief   连接池管理，预分配和复用 Connection 对象
+ *
+ * @details
+ *          - 预分配固定数量的 Connection，避免频繁 malloc
+ *          - 支持动态扩容（阈值触发临时分配）
+ *          - 惰性释放策略（60秒延迟释放临时连接）
+ *          - 双向链表管理空闲/活跃连接
+ *
+ * @layer   Core Layer
+ *
+ * @depends connection
+ * @usedby  server, examples
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_CONNECTION_POOL_H
 #define CHASE_CONNECTION_POOL_H
 

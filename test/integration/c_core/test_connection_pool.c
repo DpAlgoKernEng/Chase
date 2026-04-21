@@ -1,3 +1,23 @@
+/**
+ * @file    test_connection_pool.c
+ * @brief   Connection Pool 模块测试
+ *
+ * @details
+ *          - 测试连接池创建和销毁
+ *          - 测试获取和释放连接
+ *          - 测试阈值扩容
+ *          - 测试惰性释放
+ *          - 测试统计接口
+ *
+ * @layer   Test
+ *
+ * @depends connection_pool, connection
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "connection_pool.h"
 #include "connection.h"
 #include <stdio.h>
@@ -48,6 +68,10 @@ TEST(pool_get_release_basic) {
     PoolStats stats = connection_pool_get_stats(pool);
     assert(stats.active_count == 1);
     assert(stats.free_count == 99);
+
+    /* 验证连接状态 */
+    assert(connection_get_state(conn) == CONN_STATE_CLOSED);
+    assert(connection_get_fd(conn) == -1);
 
     /* 释放连接 */
     connection_pool_release(pool, conn);
@@ -117,15 +141,13 @@ TEST(pool_threshold_expand) {
     stats = connection_pool_get_stats(pool);
     assert(stats.temp_allocated == 1);
 
-    /* 继续获取，直到空闲链表耗尽 */
-    for (int i = 92; i < 100; i++) {
+    /* 继续获取 */
+    for (int i = 92; i < 105; i++) {
         conns[i] = connection_pool_get(pool);
+        assert(conns[i] != NULL);
     }
-    /* 空闲链表现在有 9 个（从 91 触发临时 malloc 后剩余）*/
-    /* 实际上逻辑：当 should_expand 触发时，每次都会分配临时连接 */
-    stats = connection_pool_get_stats(pool);
 
-    /* 简化测试：验证 temp_allocated > 0 */
+    stats = connection_pool_get_stats(pool);
     assert(stats.temp_allocated > 0);
 
     connection_pool_destroy(pool);

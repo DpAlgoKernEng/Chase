@@ -1,3 +1,22 @@
+/**
+ * @file    eventloop.h
+ * @brief   I/O 事件循环，支持 epoll/kqueue/poll 多后端
+ *
+ * @details
+ *          - 统一的 I/O 事件监听接口
+ *          - 支持 Linux epoll、macOS kqueue、通用 poll
+ *          - 非阻塞事件驱动架构
+ *          - 支持定时器集成
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  server, worker, connection, timer
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_EVENTLOOP_H
 #define CHASE_EVENTLOOP_H
 

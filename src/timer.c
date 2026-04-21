@@ -1,3 +1,22 @@
+/**
+ * @file    timer.c
+ * @brief   定时器管理实现，基于最小堆
+ *
+ * @details
+ *          - 最小堆结构实现高效调度
+ *          - 支持单次触发和周期性定时器
+ *          - O(log n) 插入/删除复杂度
+ *          - 与 EventLoop 集成
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  eventloop, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "timer.h"
 #include <stdlib.h>
 #include <string.h>

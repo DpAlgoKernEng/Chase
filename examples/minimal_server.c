@@ -1,3 +1,22 @@
+/**
+ * @file    minimal_server.c
+ * @brief   最小化 HTTP 服务器示例，展示核心模块的直接使用
+ *
+ * @details
+ *          - 直接使用 EventLoop、HttpParser、Router 等核心模块
+ *          - 单进程、单线程架构
+ *          - 适合学习和理解内部工作原理
+ *          - 生产环境建议使用 production_server.c
+ *
+ * @layer   Application Layer
+ *
+ * @depends eventloop, http_parser, router, error
+ * @usedby  示例程序
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "eventloop.h"
 #include "http_parser.h"
 #include "router.h"

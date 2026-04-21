@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# @file    benchmark.sh
+# @brief   性能基准测试脚本，使用 wrk 进行压力测试
+#
+# @details
+#          - 测试不同并发级别下的吞吐量
+#          - 验证 Phase 1 目标: 1线程10连接 >= 2000 req/s
+#          - 验证 Phase 2 目标: 4线程100连接 >= 5000 req/s
+#          - 生成详细报告文件
+#
+# @layer   Script
+#
+# @depends wrk, minimal_server 或 production_server
+# @usedby  开发者
+#
+# @author  minghui.liu
+# @date    2026-04-21
+#
+
 # Performance benchmark script using wrk
 # Usage: ./scripts/benchmark.sh [port] [server_type]
 # server_type: "minimal" (single-threaded) or "threaded" (multi-threaded)

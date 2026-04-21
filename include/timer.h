@@ -1,3 +1,22 @@
+/**
+ * @file    timer.h
+ * @brief   定时器管理，基于最小堆实现高效超时调度
+ *
+ * @details
+ *          - 最小堆结构，O(log n) 添加/删除
+ *          - 支持单次触发和周期性定时器
+ *          - 与 EventLoop 集成
+ *          - 按过期时间排序
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  eventloop, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_TIMER_H
 #define CHASE_TIMER_H
 

@@ -1,4 +1,23 @@
 #!/bin/bash
+#
+# @file    run_valgrind.sh
+# @brief   Valgrind 内存检测脚本，检测内存泄漏和内存错误
+#
+# @details
+#          - 使用 --leak-check=full 完整泄漏检测
+#          - 使用 --show-leak-kinds=all 显示所有泄漏类型
+#          - 使用 --track-origins=yes 跟踪错误来源
+#          - 遍历所有测试程序执行检测
+#
+# @layer   Script
+#
+# @depends valgrind, 测试框架
+# @usedby  开发者
+#
+# @author  minghui.liu
+# @date    2026-04-21
+#
+
 # Valgrind 内存检测脚本
 # 用于检测 Chase HTTP Server 库的内存泄漏和内存错误
 

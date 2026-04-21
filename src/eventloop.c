@@ -1,3 +1,22 @@
+/**
+ * @file    eventloop.c
+ * @brief   I/O 事件循环实现，支持 epoll/kqueue/poll 多后端
+ *
+ * @details
+ *          - Linux 使用 epoll
+ *          - macOS/BSD 使用 kqueue
+ *          - 其他平台使用 poll
+ *          - 统一的添加/修改/删除接口
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  server, worker, connection, timer
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "eventloop.h"
 #include <stdlib.h>
 #include <string.h>

@@ -1,3 +1,21 @@
+/**
+ * @file    test_error.c
+ * @brief   Error 模块测试
+ *
+ * @details
+ *          - 测试错误码描述获取
+ *          - 测试 HTTP 状态码描述获取
+ *          - 测试错误码到 HTTP 状态码映射
+ *
+ * @layer   Test
+ *
+ * @depends error
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "error.h"
 #include <stdio.h>
 #include <stdlib.h>

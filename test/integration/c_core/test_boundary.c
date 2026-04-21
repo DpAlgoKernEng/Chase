@@ -1,3 +1,21 @@
+/**
+ * @file    test_boundary.c
+ * @brief   边界条件测试
+ *
+ * @details
+ *          - 测试各种模块的边界条件
+ *          - 测试空输入、超长输入等极端情况
+ *          - 测试错误处理路径
+ *
+ * @layer   Test
+ *
+ * @depends http_parser, router, connection, error
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "http_parser.h"
 #include "eventloop.h"
 #include "router.h"

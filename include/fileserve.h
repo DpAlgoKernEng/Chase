@@ -1,9 +1,29 @@
+/**
+ * @file    fileserve.h
+ * @brief   静态文件服务，支持路径验证和 sendfile 零拷贝发送
+ *
+ * @details
+ *          - 路径验证防止路径穿越攻击
+ *          - 使用 realpath 解析真实路径
+ *          - Linux sendfile 零拷贝发送
+ *          - 支持 Range 请求（部分下载）
+ *
+ * @layer   Core Layer
+ *
+ * @depends mime, error
+ * @usedby  handler, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_FILESERVE_H
 #define CHASE_FILESERVE_H
 
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include "mime.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,12 +45,6 @@ typedef struct {
     uint64_t end;               /* 结束位置 */
     uint64_t total_size;        /* 文件总大小 */
 } RangeInfo;
-
-/* MIME 类型推断结果 */
-typedef struct {
-    const char *type;           /* MIME 类型字符串 */
-    const char *charset;        /* 字符集（可选） */
-} MimeType;
 
 /* 文件信息 */
 typedef struct {
@@ -76,7 +90,7 @@ const char *fileserve_get_root_dir(FileServe *fs);
 
 /**
  * 解析并验证请求路径（防止路径穿越）
- * @param fs FileServe 挝针
+ * @param fs FileServe 指针
  * @param request_path HTTP 请求路径
  * @param resolved_path 输出：解析后的真实路径（需预分配）
  * @param max_len 最大长度
@@ -93,13 +107,6 @@ FileServeResult fileserve_resolve_path(FileServe *fs, const char *request_path,
  * @return FileServeResult 结果
  */
 FileServeResult fileserve_get_file_info(FileServe *fs, const char *path, FileInfo *info);
-
-/**
- * 推断 MIME 类型
- * @param path 文件路径
- * @return MIME 类型结构
- */
-MimeType fileserve_get_mime_type(const char *path);
 
 /**
  * 解析 Range 请求头
@@ -124,7 +131,7 @@ FileServeResult fileserve_send_file(FileServe *fs, int fd, const char *path,
 
 /**
  * 读取文件内容（用于小文件或不支持 sendfile 的场景）
- * @param fs FileServe 挝针
+ * @param fs FileServe 指针
  * @param path 文件路径（已验证）
  * @param offset 起始偏移
  * @param length 读取长度
@@ -145,29 +152,13 @@ FileServeResult fileserve_read_file(FileServe *fs, const char *path,
 bool fileserve_is_path_safe(const char *resolved_path, const char *root_dir);
 
 /**
- * 添加自定义 MIME 类型映射
+ * 添加自定义 MIME 类型映射（便捷函数）
  * @param fs FileServe 指针
  * @param extension 文件扩展名（如 ".json"）
  * @param mime_type MIME 类型（如 "application/json"）
  * @return 0 成功，-1 失败
  */
 int fileserve_add_mime_type(FileServe *fs, const char *extension, const char *mime_type);
-
-/* 常用 MIME 类型常量 */
-#define MIME_TEXT_HTML       "text/html"
-#define MIME_TEXT_CSS        "text/css"
-#define MIME_TEXT_JS         "application/javascript"
-#define MIME_TEXT_PLAIN      "text/plain"
-#define MIME_TEXT_JSON       "application/json"
-#define MIME_IMAGE_JPEG      "image/jpeg"
-#define MIME_IMAGE_PNG       "image/png"
-#define MIME_IMAGE_GIF       "image/gif"
-#define MIME_IMAGE_SVG       "image/svg+xml"
-#define MIME_VIDEO_MP4       "video/mp4"
-#define MIME_AUDIO_MP3       "audio/mpeg"
-#define MIME_APP_PDF         "application/pdf"
-#define MIME_APP_ZIP         "application/zip"
-#define MIME_APP_OCTET       "application/octet-stream"
 
 #ifdef __cplusplus
 }

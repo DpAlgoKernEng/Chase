@@ -1,3 +1,22 @@
+/**
+ * @file    test_fileserve.c
+ * @brief   FileServe 模块测试
+ *
+ * @details
+ *          - 测试文件服务创建和销毁
+ *          - 测试路径解析和验证
+ *          - 测试路径穿越防护
+ *          - 测试文件信息获取
+ *
+ * @layer   Test
+ *
+ * @depends fileserve
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "fileserve.h"
 #include <stdio.h>
 #include <stdlib.h>

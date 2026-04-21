@@ -1,3 +1,22 @@
+/**
+ * @file    router.h
+ * @brief   URL 路由器，支持精确匹配、前缀匹配和优先级排序
+ *
+ * @details
+ *          - 精确匹配：完整路径匹配
+ *          - 前缀匹配：路径前缀匹配
+ *          - 方法过滤：支持 GET/POST 等 HTTP 方法掩码
+ *          - 优先级排序：高优先级路由优先匹配
+ *
+ * @layer   Core Layer
+ *
+ * @depends http_parser
+ * @usedby  server, examples
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_ROUTER_H
 #define CHASE_ROUTER_H
 

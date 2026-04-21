@@ -1,3 +1,22 @@
+/**
+ * @file    error.h
+ * @brief   错误码和 HTTP 状态码定义
+ *
+ * @details
+ *          - 内部错误码枚举（ErrorCode）
+ *          - HTTP 状态码枚举（HttpStatus）
+ *          - 错误码到 HTTP 状态码映射
+ *          - 状态码描述文本获取
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  http_parser, fileserve, handler, response, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #ifndef CHASE_ERROR_H
 #define CHASE_ERROR_H
 

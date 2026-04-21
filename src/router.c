@@ -1,3 +1,21 @@
+/**
+ * @file    router.c
+ * @brief   URL 路由器实现
+ *
+ * @details
+ *          - 精确匹配和前缀匹配
+ *          - 方法过滤
+ *          - 优先级排序
+ *
+ * @layer   Core Layer
+ *
+ * @depends http_parser
+ * @usedby  server, examples
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "router.h"
 #include <stdlib.h>
 #include <string.h>

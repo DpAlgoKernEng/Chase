@@ -1,3 +1,21 @@
+/**
+ * @file    http_parser.c
+ * @brief   HTTP/1.1 请求解析器实现
+ *
+ * @details
+ *          - 增量式状态机解析
+ *          - 支持流式输入
+ *          - 解析请求行、头部、响应体
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  server, handler, router
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "http_parser.h"
 #include <stdlib.h>
 #include <string.h>

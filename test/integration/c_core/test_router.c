@@ -1,3 +1,22 @@
+/**
+ * @file    test_router.c
+ * @brief   Router 模块测试
+ *
+ * @details
+ *          - 测试 Router 创建和销毁
+ *          - 测试精确匹配和前缀匹配
+ *          - 测试方法过滤
+ *          - 测试优先级排序
+ *
+ * @layer   Test
+ *
+ * @depends router
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "router.h"
 #include <stdio.h>
 #include <stdlib.h>

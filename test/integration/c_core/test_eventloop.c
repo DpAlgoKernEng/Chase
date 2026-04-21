@@ -1,3 +1,21 @@
+/**
+ * @file    test_eventloop.c
+ * @brief   EventLoop 模块测试
+ *
+ * @details
+ *          - 测试 EventLoop 创建和销毁
+ *          - 测试事件添加、修改、删除
+ *          - 测试事件回调触发
+ *
+ * @layer   Test
+ *
+ * @depends eventloop
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "eventloop.h"
 #include <stdio.h>
 #include <stdlib.h>

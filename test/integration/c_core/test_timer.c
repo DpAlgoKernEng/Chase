@@ -1,3 +1,21 @@
+/**
+ * @file    test_timer.c
+ * @brief   Timer 模块测试
+ *
+ * @details
+ *          - 测试 TimerHeap 创建和销毁
+ *          - 测试定时器添加和移除
+ *          - 测试最小堆排序
+ *
+ * @layer   Test
+ *
+ * @depends timer
+ * @usedby  测试框架
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "timer.h"
 #include <stdio.h>
 #include <stdlib.h>

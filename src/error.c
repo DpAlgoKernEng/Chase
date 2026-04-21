@@ -1,3 +1,21 @@
+/**
+ * @file    error.c
+ * @brief   错误码和 HTTP 状态码实现
+ *
+ * @details
+ *          - 错误码描述文本
+ *          - HTTP 状态码描述文本
+ *          - 错误码到状态码映射
+ *
+ * @layer   Core Layer
+ *
+ * @depends 无依赖
+ * @usedby  http_parser, fileserve, handler, response, server
+ *
+ * @author  minghui.liu
+ * @date    2026-04-21
+ */
+
 #include "error.h"
 
 /* 错误码描述 */
