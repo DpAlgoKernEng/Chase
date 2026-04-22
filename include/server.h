@@ -41,6 +41,11 @@ typedef struct ServerConfig {
     Router *router;             /* 外部传入的 Router */
     size_t read_buf_cap;        /* 读缓冲区容量 */
     size_t write_buf_cap;       /* 写缓冲区容量 */
+
+    /* Phase 3: Keep-Alive 支持 */
+    int connection_timeout_ms;  /* 连接空闲超时（毫秒，默认 60000） */
+    int keepalive_timeout_ms;   /* Keep-Alive 超时（毫秒，默认 5000） */
+    int max_keepalive_requests; /* 单连接最大请求数（默认 100，0=无限制） */
 } ServerConfig;
 
 /**

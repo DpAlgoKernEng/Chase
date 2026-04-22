@@ -27,10 +27,12 @@
 #include "handler.h"
 #include "buffer.h"
 #include "error.h"
+#include "timer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* Phase 3: for strcasecmp */
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
@@ -46,16 +48,27 @@
 #define DEFAULT_READ_BUF_CAP     BUFFER_DEFAULT_READ_CAP
 #define DEFAULT_WRITE_BUF_CAP    BUFFER_DEFAULT_WRITE_CAP
 
+/* Phase 3: Keep-Alive 默认超时 */
+#define DEFAULT_CONNECTION_TIMEOUT_MS  60000   /* 60s */
+#define DEFAULT_KEEPALIVE_TIMEOUT_MS   5000    /* 5s */
+#define DEFAULT_MAX_KEEPALIVE_REQUESTS 100     /* 100 requests */
+
 /* 连接上下文（每个 HTTP 连接的解析状态） */
 typedef struct ConnCtx {
     HttpParser *parser;
     HttpRequest *request;
     Server *server;
+    int fd;                          /* Phase 3: 存储fd用于超时关闭 */
 
     /* 新增：异步响应发送支持 */
     HttpResponse *pending_response;  /* 待发送的响应 */
     ResponseSendStatus send_status;  /* 发送状态 */
     bool response_pending;           /* 是否有待发送响应 */
+
+    /* Phase 3: Keep-Alive 支持 */
+    Timer *timeout_timer;            /* 连接超时定时器 */
+    int request_count;               /* 已处理的请求数 */
+    bool keepalive;                  /* 是否启用 Keep-Alive */
 } ConnCtx;
 
 /* Server 结构体 */
@@ -66,6 +79,9 @@ struct Server {
     Router *router;
     volatile sig_atomic_t running;
     int signal_pipe[2];         /* 用于信号处理的自管道 */
+
+    /* Phase 3: Keep-Alive 定时器管理 */
+    TimerHeap *timer_heap;      /* 连接超时定时器堆 */
 };
 
 /* 全局 Server 指针（信号处理需要） */
@@ -74,7 +90,29 @@ static Server *g_server = NULL;
 /* 信号处理启用标志（用于安全关闭） */
 static volatile sig_atomic_t g_server_signals_enabled = 0;
 
+/* ========== Phase 3: Forward declarations ========== */
+static void connctx_destroy(ConnCtx *ctx);
+static void prepare_for_next_request(ConnCtx *ctx, int fd, Server *server);
+static void start_connection_timeout(ConnCtx *ctx, uint64_t timeout_ms);
+static void stop_connection_timeout(ConnCtx *ctx);
+
 /* ========== 连接上下文管理 ========== */
+
+/* Phase 3: 连接超时回调 */
+static void on_connection_timeout(void *user_data) {
+    ConnCtx *ctx = (ConnCtx *)user_data;
+    if (!ctx || !ctx->server || ctx->fd < 0) return;
+
+    /* 超时，从 EventLoop 移除并关闭连接 */
+    eventloop_remove(ctx->server->loop, ctx->fd);
+    close(ctx->fd);
+
+    /* 清理定时器引用（定时器会在 heap_pop 时自动释放） */
+    ctx->timeout_timer = NULL;
+
+    /* 销毁上下文 */
+    connctx_destroy(ctx);
+}
 
 static ConnCtx *connctx_create(Server *server) {
     ConnCtx *ctx = malloc(sizeof(ConnCtx));
@@ -83,9 +121,15 @@ static ConnCtx *connctx_create(Server *server) {
     ctx->parser = http_parser_create();
     ctx->request = http_request_create();
     ctx->server = server;
+    ctx->fd = -1;                     /* Phase 3: fd 初始为无效 */
     ctx->pending_response = NULL;
     ctx->send_status = RESPONSE_SEND_COMPLETE;
     ctx->response_pending = false;
+
+    /* Phase 3: Keep-Alive 初始化 */
+    ctx->timeout_timer = NULL;
+    ctx->request_count = 0;
+    ctx->keepalive = true;  /* 默认启用 Keep-Alive */
 
     if (!ctx->parser || !ctx->request) {
         http_parser_destroy(ctx->parser);
@@ -99,6 +143,12 @@ static ConnCtx *connctx_create(Server *server) {
 
 static void connctx_destroy(ConnCtx *ctx) {
     if (!ctx) return;
+
+    /* Phase 3: 清理超时定时器 */
+    if (ctx->timeout_timer && ctx->server && ctx->server->timer_heap) {
+        timer_heap_remove(ctx->server->timer_heap, ctx->timeout_timer);
+        ctx->timeout_timer = NULL;
+    }
 
     http_parser_destroy(ctx->parser);
     http_request_destroy(ctx->request);
@@ -118,6 +168,40 @@ static void on_connection_close(int fd, void *user_data) {
     ConnCtx *ctx = (ConnCtx *)user_data;
     if (ctx) {
         connctx_destroy(ctx);
+    }
+}
+
+/* ========== Phase 3: 定时器辅助函数 ========== */
+
+/**
+ * 启动或重置连接超时定时器
+ * @param ctx 连接上下文
+ * @param timeout_ms 超时时间（毫秒）
+ */
+static void start_connection_timeout(ConnCtx *ctx, uint64_t timeout_ms) {
+    if (!ctx || !ctx->server || !ctx->server->timer_heap) return;
+
+    /* 如果已有定时器，先移除 */
+    if (ctx->timeout_timer) {
+        timer_heap_remove(ctx->server->timer_heap, ctx->timeout_timer);
+        ctx->timeout_timer = NULL;
+    }
+
+    /* 创建新定时器 */
+    ctx->timeout_timer = timer_heap_add(ctx->server->timer_heap, timeout_ms,
+                                         on_connection_timeout, ctx, false);
+}
+
+/**
+ * 停止连接超时定时器
+ * @param ctx 连接上下文
+ */
+static void stop_connection_timeout(ConnCtx *ctx) {
+    if (!ctx || !ctx->server || !ctx->server->timer_heap) return;
+
+    if (ctx->timeout_timer) {
+        timer_heap_remove(ctx->server->timer_heap, ctx->timeout_timer);
+        ctx->timeout_timer = NULL;
     }
 }
 
@@ -189,6 +273,7 @@ static void on_connection_write(int fd, uint32_t events, void *user_data) {
                     return;
                 }
                 /* 发送错误，关闭连接 */
+                stop_connection_timeout(ctx);
                 eventloop_remove(server->loop, fd);
                 close(fd);
                 connctx_destroy(ctx);
@@ -202,16 +287,21 @@ static void on_connection_write(int fd, uint32_t events, void *user_data) {
                 response_destroy(ctx->pending_response);
                 ctx->pending_response = NULL;
 
-                /* 移除写事件，关闭连接（不支持 Keep-Alive） */
-                eventloop_remove(server->loop, fd);
-                close(fd);
-                connctx_destroy(ctx);
+                /* Phase 3: Keep-Alive 处理 */
+                if (ctx->keepalive) {
+                    /* 准备下一个请求 */
+                    prepare_for_next_request(ctx, fd, server);
+                    /* 切换回读事件 */
+                    eventloop_modify(server->loop, fd, EV_READ);
+                } else {
+                    /* 关闭连接 */
+                    stop_connection_timeout(ctx);
+                    eventloop_remove(server->loop, fd);
+                    close(fd);
+                    connctx_destroy(ctx);
+                }
             } else {
                 /* 部分发送，更新状态并继续等待 */
-                /* response_get_pending 返回的是相对于当前发送位置的指针 */
-                /* 我们需要通过 response_send_remaining 或内部更新来处理 */
-                /* 由于我们已经发送了 sent 字节，需要更新 pending_response 的内部状态 */
-                /* 这里通过 response_send_remaining 来完成更新 */
                 response_send_remaining(ctx->pending_response, fd, offset + sent, len - sent);
             }
         } else {
@@ -221,13 +311,22 @@ static void on_connection_write(int fd, uint32_t events, void *user_data) {
                 response_destroy(ctx->pending_response);
                 ctx->pending_response = NULL;
             }
-            eventloop_remove(server->loop, fd);
-            close(fd);
-            connctx_destroy(ctx);
+
+            /* Phase 3: Keep-Alive 处理 */
+            if (ctx->keepalive) {
+                prepare_for_next_request(ctx, fd, server);
+                eventloop_modify(server->loop, fd, EV_READ);
+            } else {
+                stop_connection_timeout(ctx);
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+            }
         }
     }
 
     if (events & EV_ERROR || events & EV_CLOSE) {
+        stop_connection_timeout(ctx);
         eventloop_remove(server->loop, fd);
         close(fd);
         connctx_destroy(ctx);
@@ -236,11 +335,77 @@ static void on_connection_write(int fd, uint32_t events, void *user_data) {
 
 /* ========== 读回调 ========== */
 
+/**
+ * 解析 Connection 头判断是否启用 Keep-Alive
+ * @param request HTTP 请求
+ * @return true 如果 Keep-Alive 应该启用
+ */
+static bool should_keepalive(HttpRequest *request, Server *server) {
+    /* HTTP/1.0 默认不启用 Keep-Alive */
+    if (request->version && strcmp(request->version, "HTTP/1.0") == 0) {
+        /* 只有显式指定 Connection: keep-alive 才启用 */
+        const char *conn = http_request_get_header_value(request, "Connection");
+        return conn && strcasecmp(conn, "keep-alive") == 0;
+    }
+
+    /* HTTP/1.1 默认启用 Keep-Alive */
+    const char *conn = http_request_get_header_value(request, "Connection");
+    if (conn && strcasecmp(conn, "close") == 0) {
+        return false;
+    }
+
+    /* 检查最大请求数限制 */
+    int max_requests = server->config.max_keepalive_requests > 0 ?
+                       server->config.max_keepalive_requests : DEFAULT_MAX_KEEPALIVE_REQUESTS;
+
+    /* max_requests = 0 表示无限制 */
+    return max_requests == 0;
+}
+
+/**
+ * 处理 Keep-Alive 后续请求准备
+ * @param ctx 连接上下文
+ * @param fd 文件描述符
+ */
+static void prepare_for_next_request(ConnCtx *ctx, int fd, Server *server) {
+    /* 重置解析器 */
+    http_parser_reset(ctx->parser);
+
+    /* 重新创建请求对象 */
+    http_request_destroy(ctx->request);
+    ctx->request = http_request_create();
+
+    /* 增加请求计数 */
+    ctx->request_count++;
+
+    /* 检查最大请求数限制 */
+    int max_requests = server->config.max_keepalive_requests > 0 ?
+                       server->config.max_keepalive_requests : DEFAULT_MAX_KEEPALIVE_REQUESTS;
+
+    if (max_requests > 0 && ctx->request_count >= max_requests) {
+        /* 达到最大请求数，禁用 Keep-Alive */
+        ctx->keepalive = false;
+    }
+
+    /* 设置 Keep-Alive 超时 */
+    int timeout_ms = server->config.keepalive_timeout_ms > 0 ?
+                     server->config.keepalive_timeout_ms : DEFAULT_KEEPALIVE_TIMEOUT_MS;
+    start_connection_timeout(ctx, timeout_ms);
+}
+
 static void on_connection_read(int fd, uint32_t events, void *user_data) {
     ConnCtx *ctx = (ConnCtx *)user_data;
     Server *server = ctx->server;
 
     if (events & EV_READ) {
+        /* Phase 3: 重置超时定时器（有活动） */
+        int timeout_ms = ctx->keepalive ?
+                        (server->config.keepalive_timeout_ms > 0 ?
+                         server->config.keepalive_timeout_ms : DEFAULT_KEEPALIVE_TIMEOUT_MS) :
+                        (server->config.connection_timeout_ms > 0 ?
+                         server->config.connection_timeout_ms : DEFAULT_CONNECTION_TIMEOUT_MS);
+        start_connection_timeout(ctx, timeout_ms);
+
         /* 读取数据 */
         char buffer[8192];
         ssize_t n = read(fd, buffer, sizeof(buffer) - 1);
@@ -250,6 +415,7 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
                 perror("read");
             }
             /* 连接关闭 */
+            stop_connection_timeout(ctx);
             eventloop_remove(server->loop, fd);
             close(fd);
             connctx_destroy(ctx);
@@ -263,27 +429,56 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
         ParseResult result = http_parser_parse(ctx->parser, ctx->request, buffer, n, &consumed);
 
         if (result == PARSE_COMPLETE) {
+            /* Phase 3: 检查是否应该启用 Keep-Alive */
+            ctx->keepalive = should_keepalive(ctx->request, server);
+
             /* 请求解析完成，构建响应 */
             HttpResponse *resp = build_http_response(server, ctx);
             if (!resp) {
                 /* 无法创建响应，发送简单错误 */
                 const char *error_resp = "HTTP/1.1 500 Internal Error\r\nContent-Length: 0\r\n\r\n";
                 write(fd, error_resp, strlen(error_resp));
+                stop_connection_timeout(ctx);
                 eventloop_remove(server->loop, fd);
                 close(fd);
                 connctx_destroy(ctx);
                 return;
             }
 
+            /* Phase 3: 设置 Connection 头 */
+            if (ctx->keepalive) {
+                response_set_header(resp, "Connection", "keep-alive");
+                /* 设置 Keep-Alive 头 */
+                int timeout = server->config.keepalive_timeout_ms > 0 ?
+                             server->config.keepalive_timeout_ms : DEFAULT_KEEPALIVE_TIMEOUT_MS;
+                int max_req = server->config.max_keepalive_requests > 0 ?
+                             server->config.max_keepalive_requests : DEFAULT_MAX_KEEPALIVE_REQUESTS;
+                char keepalive_header[64];
+                snprintf(keepalive_header, sizeof(keepalive_header), "timeout=%d, max=%d",
+                         timeout / 1000, max_req);
+                response_set_header(resp, "Keep-Alive", keepalive_header);
+            } else {
+                response_set_header(resp, "Connection", "close");
+            }
+
             /* 使用扩展发送函数 */
             ResponseSendResult send_result = response_send_ex(resp, fd);
 
             if (send_result.status == RESPONSE_SEND_COMPLETE) {
-                /* 完全发送完成，关闭连接 */
                 response_destroy(resp);
-                eventloop_remove(server->loop, fd);
-                close(fd);
-                connctx_destroy(ctx);
+
+                /* Phase 3: Keep-Alive 处理 */
+                if (ctx->keepalive) {
+                    /* 准备下一个请求 */
+                    prepare_for_next_request(ctx, fd, server);
+                    /* 保持连接打开，继续等待读事件 */
+                } else {
+                    /* 关闭连接 */
+                    stop_connection_timeout(ctx);
+                    eventloop_remove(server->loop, fd);
+                    close(fd);
+                    connctx_destroy(ctx);
+                }
             } else if (send_result.status == RESPONSE_SEND_PARTIAL) {
                 /* 部分发送，保存响应并注册写事件 */
                 ctx->pending_response = resp;
@@ -295,14 +490,17 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
             } else {
                 /* 发送错误 */
                 response_destroy(resp);
+                stop_connection_timeout(ctx);
                 eventloop_remove(server->loop, fd);
                 close(fd);
                 connctx_destroy(ctx);
             }
         } else if (result == PARSE_ERROR) {
             /* 解析错误 */
+            stop_connection_timeout(ctx);
             HttpResponse *resp = response_create(HTTP_STATUS_BAD_REQUEST);
             response_set_body_html(resp, "<h1>400 Bad Request</h1>", 22);
+            response_set_header(resp, "Connection", "close");
 
             ResponseSendResult send_result = response_send_ex(resp, fd);
 
@@ -316,8 +514,9 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
                 response_destroy(resp);
             }
 
-            /* 如果发送完成或错误，关闭连接 */
+            /* 解析错误总是关闭连接 */
             if (send_result.status != RESPONSE_SEND_PARTIAL) {
+                stop_connection_timeout(ctx);
                 eventloop_remove(server->loop, fd);
                 close(fd);
                 connctx_destroy(ctx);
@@ -327,6 +526,7 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
     }
 
     if (events & EV_ERROR || events & EV_CLOSE) {
+        stop_connection_timeout(ctx);
         eventloop_remove(server->loop, fd);
         close(fd);
         connctx_destroy(ctx);
@@ -361,6 +561,14 @@ static void on_accept(int fd, uint32_t events, void *user_data) {
             close(client_fd);
             continue;
         }
+
+        /* Phase 3: 设置 fd */
+        ctx->fd = client_fd;
+
+        /* Phase 3: 启动连接超时定时器 */
+        int timeout_ms = server->config.connection_timeout_ms > 0 ?
+                         server->config.connection_timeout_ms : DEFAULT_CONNECTION_TIMEOUT_MS;
+        start_connection_timeout(ctx, timeout_ms);
 
         /* 注册读事件回调 */
         eventloop_add(server->loop, client_fd, EV_READ, on_connection_read, ctx);
@@ -476,6 +684,20 @@ Server *server_create(const ServerConfig *config) {
         return NULL;
     }
 
+    /* Phase 3: 创建定时器堆用于连接超时管理 */
+    server->timer_heap = timer_heap_create(max_conn);
+    if (!server->timer_heap) {
+        eventloop_destroy(server->loop);
+        socket_close(server->server_fd);
+        close(server->signal_pipe[0]);
+        close(server->signal_pipe[1]);
+        if (!config->router) {
+            router_destroy(server->router);
+        }
+        free(server);
+        return NULL;
+    }
+
     /* 注册 Accept 回调 */
     eventloop_add(server->loop, server->server_fd, EV_READ, on_accept, server);
 
@@ -509,6 +731,12 @@ void server_destroy(Server *server) {
 
     if (server->loop) {
         eventloop_destroy(server->loop);
+    }
+
+    /* Phase 3: 销毁定时器堆 */
+    if (server->timer_heap) {
+        timer_heap_destroy(server->timer_heap);
+        server->timer_heap = NULL;
     }
 
     if (server->server_fd >= 0) {

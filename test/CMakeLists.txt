@@ -24,6 +24,11 @@ set(TEST_SOURCES_PHASE2
     integration/c_core/test_signal_handling.c
 )
 
+# 测试源文件 - Phase 3 Keep-Alive 测试
+set(TEST_SOURCES_PHASE3
+    integration/c_core/test_keepalive.c
+)
+
 # 测试源文件 - Phase 1 + Phase 2 联合测试
 set(TEST_SOURCES_INTEGRATION
     integration/c_core/test_phase1_phase2_integration.c
@@ -33,6 +38,7 @@ set(TEST_SOURCES_INTEGRATION
 set(TEST_SOURCES
     ${TEST_SOURCES_PHASE1}
     ${TEST_SOURCES_PHASE2}
+    ${TEST_SOURCES_PHASE3}
     ${TEST_SOURCES_INTEGRATION}
 )
 
