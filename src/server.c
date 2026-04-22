@@ -354,12 +354,8 @@ static bool should_keepalive(HttpRequest *request, Server *server) {
         return false;
     }
 
-    /* 检查最大请求数限制 */
-    int max_requests = server->config.max_keepalive_requests > 0 ?
-                       server->config.max_keepalive_requests : DEFAULT_MAX_KEEPALIVE_REQUESTS;
-
-    /* max_requests = 0 表示无限制 */
-    return max_requests == 0;
+    /* HTTP/1.1 默认启用 Keep-Alive，max_requests 限制在 prepare_for_next_request 中处理 */
+    return true;
 }
 
 /**

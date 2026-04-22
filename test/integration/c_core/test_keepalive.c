@@ -143,35 +143,45 @@ static void add_get_route(Router *router, const char *path, RouteHandler handler
 
 /**
  * 测试 1: HTTP/1.1 默认 Keep-Alive
+ *
+ * 修复：在 fork 后的子进程中创建 server，避免 kqueue fd 共享导致无限循环
  */
 TEST(http11_default_keepalive) {
     int port = TEST_PORT_BASE + 1;
-    ServerConfig config = {
-        .port = port,
-        .max_connections = 100,
-        .backlog = 10,
-        .bind_addr = NULL,
-        .reuseport = false,
-        .router = NULL,
-        .read_buf_cap = 0,
-        .write_buf_cap = 0,
-        .connection_timeout_ms = TEST_TIMEOUT_MS,
-        .keepalive_timeout_ms = TEST_TIMEOUT_MS,
-        .max_keepalive_requests = 10
-    };
 
-    Server *server = server_create(&config);
-    ASSERT(server != NULL, "server_create failed");
-
-    Router *router = server_get_router(server);
-    add_get_route(router, "/", simple_handler);
-
-    /* 启动服务器（后台进程） */
+    /* 启动服务器（后台进程） - 在子进程中创建 server */
     pid_t server_pid = fork();
     if (server_pid == 0) {
+        /* 子进程：创建 server 并运行 */
+        ServerConfig config = {
+            .port = port,
+            .max_connections = 100,
+            .backlog = 10,
+            .bind_addr = NULL,
+            .reuseport = false,
+            .router = NULL,
+            .read_buf_cap = 0,
+            .write_buf_cap = 0,
+            .connection_timeout_ms = TEST_TIMEOUT_MS,
+            .keepalive_timeout_ms = TEST_TIMEOUT_MS,
+            .max_keepalive_requests = 10
+        };
+
+        Server *server = server_create(&config);
+        if (!server) {
+            fprintf(stderr, "Child: server_create failed\n");
+            exit(1);
+        }
+
+        Router *router = server_get_router(server);
+        add_get_route(router, "/", simple_handler);
+
         server_run(server);
+        server_destroy(server);
         exit(0);
     }
+
+    ASSERT(server_pid > 0, "fork failed");
 
     sleep(1);
 
@@ -188,39 +198,44 @@ TEST(http11_default_keepalive) {
     close(client_fd);
     kill(server_pid, SIGTERM);
     waitpid(server_pid, NULL, 0);
-    server_destroy(server);
 }
 
 /**
  * 测试 2: HTTP/1.0 不默认 Keep-Alive
+ *
+ * 修复：在 fork 后的子进程中创建 server
  */
 TEST(http10_no_default_keepalive) {
     int port = TEST_PORT_BASE + 2;
-    ServerConfig config = {
-        .port = port,
-        .max_connections = 100,
-        .backlog = 10,
-        .bind_addr = NULL,
-        .reuseport = false,
-        .router = NULL,
-        .read_buf_cap = 0,
-        .write_buf_cap = 0,
-        .connection_timeout_ms = TEST_TIMEOUT_MS,
-        .keepalive_timeout_ms = TEST_TIMEOUT_MS,
-        .max_keepalive_requests = 10
-    };
-
-    Server *server = server_create(&config);
-    ASSERT(server != NULL, "server_create failed");
-
-    Router *router = server_get_router(server);
-    add_get_route(router, "/", simple_handler);
 
     pid_t server_pid = fork();
     if (server_pid == 0) {
+        ServerConfig config = {
+            .port = port,
+            .max_connections = 100,
+            .backlog = 10,
+            .bind_addr = NULL,
+            .reuseport = false,
+            .router = NULL,
+            .read_buf_cap = 0,
+            .write_buf_cap = 0,
+            .connection_timeout_ms = TEST_TIMEOUT_MS,
+            .keepalive_timeout_ms = TEST_TIMEOUT_MS,
+            .max_keepalive_requests = 10
+        };
+
+        Server *server = server_create(&config);
+        if (!server) exit(1);
+
+        Router *router = server_get_router(server);
+        add_get_route(router, "/", simple_handler);
+
         server_run(server);
+        server_destroy(server);
         exit(0);
     }
+
+    ASSERT(server_pid > 0, "fork failed");
 
     sleep(1);
 
@@ -237,39 +252,44 @@ TEST(http10_no_default_keepalive) {
     close(client_fd);
     kill(server_pid, SIGTERM);
     waitpid(server_pid, NULL, 0);
-    server_destroy(server);
 }
 
 /**
  * 测试 3: Connection: close 请求
+ *
+ * 修复：在 fork 后的子进程中创建 server
  */
 TEST(connection_close_request) {
     int port = TEST_PORT_BASE + 3;
-    ServerConfig config = {
-        .port = port,
-        .max_connections = 100,
-        .backlog = 10,
-        .bind_addr = NULL,
-        .reuseport = false,
-        .router = NULL,
-        .read_buf_cap = 0,
-        .write_buf_cap = 0,
-        .connection_timeout_ms = TEST_TIMEOUT_MS,
-        .keepalive_timeout_ms = TEST_TIMEOUT_MS,
-        .max_keepalive_requests = 10
-    };
-
-    Server *server = server_create(&config);
-    ASSERT(server != NULL, "server_create failed");
-
-    Router *router = server_get_router(server);
-    add_get_route(router, "/", simple_handler);
 
     pid_t server_pid = fork();
     if (server_pid == 0) {
+        ServerConfig config = {
+            .port = port,
+            .max_connections = 100,
+            .backlog = 10,
+            .bind_addr = NULL,
+            .reuseport = false,
+            .router = NULL,
+            .read_buf_cap = 0,
+            .write_buf_cap = 0,
+            .connection_timeout_ms = TEST_TIMEOUT_MS,
+            .keepalive_timeout_ms = TEST_TIMEOUT_MS,
+            .max_keepalive_requests = 10
+        };
+
+        Server *server = server_create(&config);
+        if (!server) exit(1);
+
+        Router *router = server_get_router(server);
+        add_get_route(router, "/", simple_handler);
+
         server_run(server);
+        server_destroy(server);
         exit(0);
     }
+
+    ASSERT(server_pid > 0, "fork failed");
 
     sleep(1);
 
@@ -286,39 +306,44 @@ TEST(connection_close_request) {
     close(client_fd);
     kill(server_pid, SIGTERM);
     waitpid(server_pid, NULL, 0);
-    server_destroy(server);
 }
 
 /**
  * 测试 4: 同一连接多次请求 (Keep-Alive pipeline)
+ *
+ * 修复：在 fork 后的子进程中创建 server
  */
 TEST(keepalive_multiple_requests) {
     int port = TEST_PORT_BASE + 4;
-    ServerConfig config = {
-        .port = port,
-        .max_connections = 100,
-        .backlog = 10,
-        .bind_addr = NULL,
-        .reuseport = false,
-        .router = NULL,
-        .read_buf_cap = 0,
-        .write_buf_cap = 0,
-        .connection_timeout_ms = TEST_TIMEOUT_MS,
-        .keepalive_timeout_ms = TEST_TIMEOUT_MS,
-        .max_keepalive_requests = 5
-    };
-
-    Server *server = server_create(&config);
-    ASSERT(server != NULL, "server_create failed");
-
-    Router *router = server_get_router(server);
-    add_get_route(router, "/", simple_handler);
 
     pid_t server_pid = fork();
     if (server_pid == 0) {
+        ServerConfig config = {
+            .port = port,
+            .max_connections = 100,
+            .backlog = 10,
+            .bind_addr = NULL,
+            .reuseport = false,
+            .router = NULL,
+            .read_buf_cap = 0,
+            .write_buf_cap = 0,
+            .connection_timeout_ms = TEST_TIMEOUT_MS,
+            .keepalive_timeout_ms = TEST_TIMEOUT_MS,
+            .max_keepalive_requests = 5
+        };
+
+        Server *server = server_create(&config);
+        if (!server) exit(1);
+
+        Router *router = server_get_router(server);
+        add_get_route(router, "/", simple_handler);
+
         server_run(server);
+        server_destroy(server);
         exit(0);
     }
+
+    ASSERT(server_pid > 0, "fork failed");
 
     sleep(1);
 
@@ -337,7 +362,6 @@ TEST(keepalive_multiple_requests) {
     close(client_fd);
     kill(server_pid, SIGTERM);
     waitpid(server_pid, NULL, 0);
-    server_destroy(server);
 }
 
 /* ========== 主函数 ========== */
