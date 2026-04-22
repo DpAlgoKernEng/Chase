@@ -96,40 +96,30 @@ bool vhost_wildcard_match(const char *wildcard, const char *hostname) {
     /* 通配符格式：*.example.com */
     if (wildcard[0] != '*' || wildcard[1] != '.') return false;
 
-    const char *wildcard_suffix = wildcard + 2;  /* 跳过 "*." */
+    const char *wildcard_suffix = wildcard + 1;  /* ".example.com" */
     size_t suffix_len = strlen(wildcard_suffix);
     size_t hostname_len = strlen(hostname);
 
-    /* hostname 必须比 suffix 长 */
+    /* hostname 必须比 suffix 长（至少有一个子域名） */
     if (hostname_len <= suffix_len) return false;
 
-    /* 检查 hostname 是否以 suffix 结尾 */
+    /* hostname 必须以 ".example.com" 结尾 */
     const char *hostname_suffix = hostname + hostname_len - suffix_len;
     if (strcmp(hostname_suffix, wildcard_suffix) != 0) return false;
 
-    /* 检查 hostname 中只有一个 '.' 在 suffix 前面（一级子域名） */
-    /* 例如：*.example.com 匹配 sub.example.com，不匹配 sub.sub.example.com */
-    const char *dot_pos = hostname;
-    while (dot_pos < hostname_suffix) {
-        if (*dot_pos == '.') {
-            /* 检查是否是最后一个 '.'（即一级子域名） */
-            /* hostname_suffix 前面的最后一个 '.' 位置 */
-            const char *last_dot = hostname_suffix - 1;
-            while (last_dot > hostname && *last_dot != '.') {
-                last_dot--;
-            }
-            /* 如果只有一个 '.' 在 suffix 前面，则是一级子域名 */
-            if (last_dot < hostname_suffix && last_dot >= hostname) {
-                return true;  /* 一级子域名匹配 */
-            }
-            break;
+    /* 检查 hostname_suffix 前面的部分是否不含 '.'
+     * 如果有 '.' 说明是多级子域名，不匹配
+     */
+    const char *subdomain_part = hostname;
+    while (subdomain_part < hostname_suffix) {
+        if (*subdomain_part == '.') {
+            return false;  /* 多级子域名 */
         }
-        dot_pos++;
+        subdomain_part++;
     }
 
-    /* 如果没有 '.' 在 suffix 前面，也匹配（例如 example.com 匹配 *.com 不应该，但这是边界情况） */
-    /* 实际上我们要求至少有一个子域名 */
-    return false;
+    /* 没有 '.' 在 suffix 前面，是一级子域名 */
+    return true;
 }
 
 VirtualHost *vhost_manager_match(VHostManager *manager, const char *hostname) {

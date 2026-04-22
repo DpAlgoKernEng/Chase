@@ -31,6 +31,13 @@ set(TEST_SOURCES_PHASE3
     integration/c_core/test_range.c
 )
 
+# 测试源文件 - Phase 4 SSL + VHost + Config 测试
+set(TEST_SOURCES_PHASE4
+    integration/c_core/test_vhost.c
+    integration/c_core/test_config.c
+    integration/c_core/test_ssl_wrap.c
+)
+
 # 测试源文件 - Phase 1 + Phase 2 联合测试
 set(TEST_SOURCES_INTEGRATION
     integration/c_core/test_phase1_phase2_integration.c
@@ -41,6 +48,7 @@ set(TEST_SOURCES
     ${TEST_SOURCES_PHASE1}
     ${TEST_SOURCES_PHASE2}
     ${TEST_SOURCES_PHASE3}
+    ${TEST_SOURCES_PHASE4}
     ${TEST_SOURCES_INTEGRATION}
 )
 
