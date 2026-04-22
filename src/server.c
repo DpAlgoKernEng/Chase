@@ -429,6 +429,26 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
         ParseResult result = http_parser_parse(ctx->parser, ctx->request, buffer, n, &consumed);
 
         if (result == PARSE_COMPLETE) {
+            /* Phase 3.3: HTTP/1.1 合规 - Host 头必需验证 */
+            if (ctx->request->version && strncmp(ctx->request->version, "HTTP/1.1", 8) == 0) {
+                const char *host = http_request_get_header_value(ctx->request, "Host");
+                if (!host || strlen(host) == 0) {
+                    /* HTTP/1.1 请求缺少 Host 头，返回 400 Bad Request */
+                    const char *error_resp = "HTTP/1.1 400 Bad Request\r\n"
+                                             "Content-Type: text/plain\r\n"
+                                             "Content-Length: 42\r\n"
+                                             "Connection: close\r\n"
+                                             "\r\n"
+                                             "Bad Request: Host header required";
+                    write(fd, error_resp, strlen(error_resp));
+                    stop_connection_timeout(ctx);
+                    eventloop_remove(server->loop, fd);
+                    close(fd);
+                    connctx_destroy(ctx);
+                    return;
+                }
+            }
+
             /* Phase 3: 检查是否应该启用 Keep-Alive */
             ctx->keepalive = should_keepalive(ctx->request, server);
 
