@@ -41,6 +41,17 @@ typedef enum {
     PARSER_STATE_HEADER_LF,      /* 头部值后 LF */
     PARSER_STATE_HEADERS_END_CR, /* 空行 CR（头部结束） */
     PARSER_STATE_BODY,           /* 解析 body */
+    /* Phase 3: Chunked 编码状态 */
+    PARSER_STATE_CHUNK_SIZE,     /* 解析 chunk 大小 */
+    PARSER_STATE_CHUNK_SIZE_CR,  /* chunk 大小后 CR */
+    PARSER_STATE_CHUNK_SIZE_LF,  /* chunk 大小后 LF */
+    PARSER_STATE_CHUNK_DATA,     /* 解析 chunk 数据 */
+    PARSER_STATE_CHUNK_DATA_CR,  /* chunk 数据后 CR */
+    PARSER_STATE_CHUNK_DATA_LF,  /* chunk 数据后 LF */
+    PARSER_STATE_CHUNK_TRAILER_CR, /* chunk trailer CR */
+    PARSER_STATE_CHUNK_TRAILER_LF, /* chunk trailer LF */
+    PARSER_STATE_CHUNK_SKIP_TRAILER_LINE, /* 跳过 trailer 行 */
+    PARSER_STATE_CHUNK_SKIP_TRAILER_LF,   /* trailer 行 LF */
     PARSER_STATE_COMPLETE        /* 解析完成 */
 } ParserState;
 
@@ -75,6 +86,13 @@ struct HttpParser {
     int header_value_capacity;
 
     size_t body_received;        /* 已接收 body 长度 */
+
+    /* Phase 3: Chunked 编码支持 */
+    char *chunk_size_buf;        /* chunk 大小缓冲区 */
+    int chunk_size_len;
+    int chunk_size_capacity;
+    size_t chunk_size;           /* 当前 chunk 大小 */
+    size_t chunk_received;       /* 当前 chunk 已接收字节数 */
 };
 
 /* ========== 辅助函数 ========== */
@@ -225,8 +243,16 @@ HttpParser *http_parser_create(void) {
 
     parser->body_received = 0;
 
+    /* Phase 3: Chunked 编码支持初始化 */
+    parser->chunk_size_capacity = 16;
+    parser->chunk_size_buf = malloc(parser->chunk_size_capacity);
+    parser->chunk_size_len = 0;
+    parser->chunk_size = 0;
+    parser->chunk_received = 0;
+
     if (!parser->method_buf || !parser->path_buf || !parser->query_buf ||
-        !parser->version_buf || !parser->header_name_buf || !parser->header_value_buf) {
+        !parser->version_buf || !parser->header_name_buf || !parser->header_value_buf ||
+        !parser->chunk_size_buf) {
         http_parser_destroy(parser);
         return NULL;
     }
@@ -242,6 +268,7 @@ void http_parser_destroy(HttpParser *parser) {
     free(parser->version_buf);
     free(parser->header_name_buf);
     free(parser->header_value_buf);
+    free(parser->chunk_size_buf);  /* Phase 3: Chunked 编码 */
     free(parser);
 }
 
@@ -259,6 +286,8 @@ HttpRequest *http_request_create(void) {
     req->body = NULL;
     req->body_length = 0;
     req->content_length = 0;
+    req->is_chunked = false;        /* Phase 3: Chunked 编码 */
+    req->chunk_body_capacity = 0;   /* Phase 3: Chunked body 缓冲区 */
 
     if (!req->headers) {
         free(req);
@@ -289,10 +318,14 @@ void http_request_destroy(HttpRequest *req) {
 
 ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                               const char *data, size_t len, size_t *consumed) {
-    if (!parser || !req || !data) return PARSE_ERROR;
+    if (!parser || !req || !data) {
+        *consumed = 0;
+        return PARSE_ERROR;
+    }
 
     *consumed = 0;
     size_t pos = 0;
+    ParseResult result = PARSE_NEED_MORE;  /* 使用变量追踪结果 */
 
     while (pos < len) {
         char c = data[pos];
@@ -313,7 +346,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->method_buf, &parser->method_len,
                                        &parser->method_capacity, c, MAX_METHOD_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -338,7 +375,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->path_buf, &parser->path_len,
                                        &parser->path_capacity, c, MAX_PATH_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -349,7 +390,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->query_buf, &parser->query_len,
                                        &parser->query_capacity, c, MAX_QUERY_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -370,7 +415,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->version_buf, &parser->version_len,
                                        &parser->version_capacity, c, MAX_VERSION_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -378,6 +427,8 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             if (c == '\n') {
                 parser->state = PARSER_STATE_VERSION_LF;
             } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
                 return PARSE_ERROR;
             }
             break;
@@ -404,7 +455,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->header_name_buf, &parser->header_name_len,
                                        &parser->header_name_capacity, c, MAX_HEADER_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -427,7 +482,11 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
             } else {
                 ret = append_to_buffer(&parser->header_value_buf, &parser->header_value_len,
                                        &parser->header_value_capacity, c, MAX_HEADER_SIZE);
-                if (ret < 0) return PARSE_ERROR;
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
             }
             break;
 
@@ -443,8 +502,21 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                         parser->header_value_buf, parser->header_value_len);
                 }
 
+                /* Phase 3: 检查 Transfer-Encoding: chunked */
+                if (strcasecmp(parser->header_name_buf, "Transfer-Encoding") == 0) {
+                    /* 检查值是否包含 "chunked" */
+                    for (int i = 0; i < parser->header_value_len; i++) {
+                        if (strncasecmp(parser->header_value_buf + i, "chunked", 7) == 0) {
+                            req->is_chunked = true;
+                            break;
+                        }
+                    }
+                }
+
                 parser->state = PARSER_STATE_HEADER_LF;
             } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
                 return PARSE_ERROR;
             }
             break;
@@ -471,17 +543,39 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                              strndup_custom(parser->query_buf, parser->query_len) : NULL;
                 req->version = strndup_custom(parser->version_buf, parser->version_len);
 
-                /* 检查是否有 body */
-                if (req->content_length > 0) {
+                /* Phase 3: 检查是否有 body */
+                if (req->is_chunked) {
+                    /* 使用 chunked 编码，开始解析 chunk */
+                    parser->state = PARSER_STATE_CHUNK_SIZE;
+                    parser->chunk_size_len = 0;
+                    parser->chunk_size = 0;
+                    parser->chunk_received = 0;
+                    /* 初始化 chunked body 缓冲区 */
+                    req->body = malloc(1024);
+                    req->chunk_body_capacity = 1024;
+                    req->body_length = 0;
+                    if (!req->body) {
+                        *consumed = pos;
+                        parser->parsed_len += pos;
+                        return PARSE_ERROR;
+                    }
+                } else if (req->content_length > 0) {
+                    /* 使用 Content-Length */
                     parser->state = PARSER_STATE_BODY;
                     parser->body_received = 0;
                     req->body = malloc(req->content_length + 1);
-                    if (!req->body) return PARSE_ERROR;
+                    if (!req->body) {
+                        *consumed = pos;
+                        parser->parsed_len += pos;
+                        return PARSE_ERROR;
+                    }
                 } else {
                     /* 无 body，解析完成 */
                     parser->state = PARSER_STATE_COMPLETE;
                 }
             } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
                 return PARSE_ERROR;
             }
             break;
@@ -495,6 +589,161 @@ ParseResult http_parser_parse(HttpParser *parser, HttpRequest *req,
                     req->body_length = parser->body_received;
                     parser->state = PARSER_STATE_COMPLETE;
                 }
+            }
+            break;
+
+        /* Phase 3: Chunked 编码解析 */
+        case PARSER_STATE_CHUNK_SIZE:
+            /* 解析 chunk 大小（十六进制） */
+            if (c == '\r') {
+                /* chunk 大小结束 */
+                /* 解析十六进制 chunk 大小 */
+                if (parser->chunk_size_len > 0) {
+                    char temp[32];
+                    memcpy(temp, parser->chunk_size_buf, parser->chunk_size_len);
+                    temp[parser->chunk_size_len] = '\0';
+                    parser->chunk_size = strtoul(temp, NULL, 16);
+                } else {
+                    parser->chunk_size = 0;
+                }
+                parser->state = PARSER_STATE_CHUNK_SIZE_CR;
+            } else if (c == ';') {
+                /* chunk 扩展开始 - 先解析已收集的 chunk 大小 */
+                if (parser->chunk_size_len > 0) {
+                    char temp[32];
+                    memcpy(temp, parser->chunk_size_buf, parser->chunk_size_len);
+                    temp[parser->chunk_size_len] = '\0';
+                    parser->chunk_size = strtoul(temp, NULL, 16);
+                } else {
+                    parser->chunk_size = 0;
+                }
+                parser->state = PARSER_STATE_CHUNK_SIZE_CR;
+            } else if (isxdigit((unsigned char)c)) {
+                /* 十六进制数字 */
+                ret = append_to_buffer(&parser->chunk_size_buf, &parser->chunk_size_len,
+                                       &parser->chunk_size_capacity, c, 32);
+                if (ret < 0) {
+                    *consumed = pos;
+                    parser->parsed_len += pos;
+                    return PARSE_ERROR;
+                }
+            } else if (c != ' ') {
+                /* 跳过空格，其他字符为错误 */
+                *consumed = pos;
+                parser->parsed_len += pos;
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_SIZE_CR:
+            /* 等待 chunk-size 行的 LF，或跳过 chunk 扩展参数 */
+            if (c == '\n') {
+                parser->state = PARSER_STATE_CHUNK_SIZE_LF;
+            } else {
+                /* 跳过 chunk 扩展参数（;name=value 等）直到 LF */
+                /* 保持当前状态继续消耗字符 */
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_SIZE_LF:
+            /* 开始读取 chunk 数据 */
+            if (parser->chunk_size == 0) {
+                /* 最后一个 chunk（大小为 0），开始 trailer */
+                parser->state = PARSER_STATE_CHUNK_TRAILER_CR;
+                /* 使用 continue 处理当前字符在 CHUNK_TRAILER_CR 状态 */
+                continue;
+            } else {
+                parser->state = PARSER_STATE_CHUNK_DATA;
+                parser->chunk_received = 0;
+                /* 当前字符可能是 chunk 数据，使用 continue 处理 */
+                continue;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_DATA:
+            /* 读取 chunk 数据 */
+            if (parser->chunk_received < parser->chunk_size) {
+                /* 确保 body 缓冲区足够大 */
+                if (req->body_length + 1 >= req->chunk_body_capacity) {
+                    size_t new_cap = req->chunk_body_capacity * 2;
+                    char *new_buf = realloc(req->body, new_cap);
+                    if (!new_buf) {
+                        *consumed = pos;
+                        parser->parsed_len += pos;
+                        return PARSE_ERROR;
+                    }
+                    req->body = new_buf;
+                    req->chunk_body_capacity = new_cap;
+                }
+                req->body[req->body_length++] = c;
+                parser->chunk_received++;
+                if (parser->chunk_received >= parser->chunk_size) {
+                    parser->state = PARSER_STATE_CHUNK_DATA_CR;
+                }
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_DATA_CR:
+            if (c == '\r') {
+                parser->state = PARSER_STATE_CHUNK_DATA_LF;
+            } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_DATA_LF:
+            if (c == '\n') {
+                /* chunk 结束，准备下一个 chunk */
+                parser->state = PARSER_STATE_CHUNK_SIZE;
+                parser->chunk_size_len = 0;
+            } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_TRAILER_CR:
+            /* Chunk trailer 行（可选头部）或空行 */
+            if (c == '\r') {
+                /* 可能是空行结束 */
+                parser->state = PARSER_STATE_CHUNK_TRAILER_LF;
+            } else {
+                /* 有 trailer 行，跳过该行直到 CRLF */
+                parser->state = PARSER_STATE_CHUNK_SKIP_TRAILER_LINE;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_SKIP_TRAILER_LINE:
+            /* 跳过 trailer 行内容 */
+            if (c == '\r') {
+                parser->state = PARSER_STATE_CHUNK_SKIP_TRAILER_LF;
+            }
+            /* 否则继续跳过 trailer 行字符 */
+            break;
+
+        case PARSER_STATE_CHUNK_SKIP_TRAILER_LF:
+            if (c == '\n') {
+                /* trailer 行结束，回到 CHUNK_TRAILER_CR 看是否有更多 trailer */
+                parser->state = PARSER_STATE_CHUNK_TRAILER_CR;
+            } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
+                return PARSE_ERROR;
+            }
+            break;
+
+        case PARSER_STATE_CHUNK_TRAILER_LF:
+            if (c == '\n') {
+                /* trailer 结束，chunked body 完成 */
+                req->body[req->body_length] = '\0';
+                parser->state = PARSER_STATE_COMPLETE;
+            } else {
+                *consumed = pos;
+                parser->parsed_len += pos;
+                return PARSE_ERROR;
             }
             break;
 
@@ -562,4 +811,10 @@ void http_parser_reset(HttpParser *parser) {
     if (parser->header_value_buf) parser->header_value_buf[0] = '\0';
 
     parser->body_received = 0;
+
+    /* Phase 3: 重置 chunk 状态 */
+    parser->chunk_size_len = 0;
+    if (parser->chunk_size_buf) parser->chunk_size_buf[0] = '\0';
+    parser->chunk_size = 0;
+    parser->chunk_received = 0;
 }

@@ -65,6 +65,8 @@ typedef struct HttpRequest {
     char *body;
     size_t body_length;
     size_t content_length;
+    bool is_chunked;            /* Phase 3: 是否使用 chunked 编码 */
+    size_t chunk_body_capacity; /* Phase 3: chunked body 缓冲区容量 */
 } HttpRequest;
 
 /* HTTP 解析器 */
