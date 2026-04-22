@@ -24,10 +24,11 @@ set(TEST_SOURCES_PHASE2
     integration/c_core/test_signal_handling.c
 )
 
-# 测试源文件 - Phase 3 Keep-Alive 测试
+# 测试源文件 - Phase 3 Keep-Alive + Range 测试
 set(TEST_SOURCES_PHASE3
     integration/c_core/test_keepalive.c
     integration/c_core/test_chunked.c
+    integration/c_core/test_range.c
 )
 
 # 测试源文件 - Phase 1 + Phase 2 联合测试
