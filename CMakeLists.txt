@@ -54,6 +54,8 @@ set(CHASE_CORE_HEADERS
     include/response.h
     include/handler.h
     include/server.h
+    include/ssl_wrap.h
+    include/vhost.h
 )
 
 set(CHASE_CORE_SOURCES
@@ -73,6 +75,8 @@ set(CHASE_CORE_SOURCES
     src/response.c
     src/handler.c
     src/server.c
+    src/ssl_wrap.c
+    src/vhost.c
 )
 
 # 创建核心库
