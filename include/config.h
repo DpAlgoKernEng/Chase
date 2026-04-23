@@ -7,6 +7,7 @@
  *          - JSON 配置文件加载
  *          - 配置验证（必填字段检查）
  *          - 默认配置值
+ *          - Phase 5: 热更新支持（版本追踪、checksum、原子/渐进更新）
  *
  * @layer   Core Layer
  *
@@ -24,10 +25,35 @@
 #include "ssl_wrap.h"
 #include "vhost.h"
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Phase 5: 配置版本结构 */
+typedef struct ConfigVersion {
+    uint64_t version;           /* 版本号（递增） */
+    uint64_t checksum;          /* 配置内容 checksum */
+    uint64_t timestamp;         /* 更新时间戳（毫秒） */
+    char *source_file;          /* 来源文件路径 */
+} ConfigVersion;
+
+/* Phase 5: 配置更新策略 */
+typedef enum {
+    CONFIG_UPDATE_ATOMIC,       /* 原子更新（立即生效） */
+    CONFIG_UPDATE_GRADUAL       /* 渐进更新（等待连接关闭） */
+} ConfigUpdatePolicy;
+
+/* Phase 5: 配置更新结果 */
+typedef struct ConfigUpdateResult {
+    bool success;               /* 是否成功 */
+    uint64_t old_version;       /* 原版本号 */
+    uint64_t new_version;       /* 新版本号 */
+    int active_connections;     /* 更新时活跃连接数 */
+    int delay_ms;               /* 实际延迟时间 */
+    char *error_message;        /* 错误信息（失败时） */
+} ConfigUpdateResult;
 
 /* HTTP 服务器完整配置 */
 typedef struct HttpConfig {
@@ -57,6 +83,13 @@ typedef struct HttpConfig {
     /* 配置来源 */
     char *config_file_path;      /* 配置文件路径 */
     bool from_file;              /* 是否从文件加载 */
+
+    /* Phase 5: 热更新相关字段 */
+    ConfigVersion version;       /* 配置版本信息 */
+    ConfigUpdatePolicy update_policy; /* 更新策略 */
+    bool hot_update_enabled;     /* 是否启用热更新 */
+    int active_connections;      /* 活跃连接计数（渐进更新用） */
+    uint64_t last_update_time;   /* 最后更新时间 */
 } HttpConfig;
 
 /* 配置加载选项 */
@@ -134,6 +167,99 @@ int http_config_merge(HttpConfig *dst, HttpConfig *src);
 #define DEFAULT_CONNECTION_TIMEOUT 60000
 #define DEFAULT_KEEPALIVE_TIMEOUT  5000
 #define DEFAULT_MAX_KEEPALIVE_REQS 100
+
+/* ========== Phase 5: 热更新 API ========== */
+
+/**
+ * 启用配置热更新
+ * @param config HttpConfig 指针
+ * @param policy 更新策略
+ * @return 0 成功，-1 失败
+ */
+int http_config_enable_hot_update(HttpConfig *config, ConfigUpdatePolicy policy);
+
+/**
+ * 执行配置热更新
+ * @param config HttpConfig 指针
+ * @param file_path 新配置文件路径
+ * @param result 输出：更新结果
+ * @return 0 成功，-1 失败
+ */
+int http_config_hot_update(HttpConfig *config, const char *file_path, ConfigUpdateResult *result);
+
+/**
+ * 获取配置版本号
+ * @param config HttpConfig 指针
+ * @return 版本号
+ */
+uint64_t http_config_get_version(HttpConfig *config);
+
+/**
+ * 计算配置 checksum
+ * @param config HttpConfig 指针
+ * @return checksum 值
+ */
+uint64_t http_config_calculate_checksum(HttpConfig *config);
+
+/**
+ * 检查配置文件是否已变更
+ * @param config HttpConfig 指针
+ * @param file_path 配置文件路径
+ * @return true 已变更，false 未变更
+ */
+bool http_config_has_changed(HttpConfig *config, const char *file_path);
+
+/**
+ * 计算更新延迟时间（渐进更新）
+ * @param config HttpConfig 指针
+ * @param active_connections 活跃连接数
+ * @return 建议延迟时间（毫秒）
+ */
+int http_config_calculate_update_delay(HttpConfig *config, int active_connections);
+
+/**
+ * 注册活跃连接
+ * @param config HttpConfig 指针
+ */
+void http_config_register_connection(HttpConfig *config);
+
+/**
+ * 注销活跃连接
+ * @param config HttpConfig 指针
+ */
+void http_config_unregister_connection(HttpConfig *config);
+
+/**
+ * 等待所有连接关闭
+ * @param config HttpConfig 指针
+ * @param max_wait_ms 最大等待时间
+ * @return 0 成功，-1 超时
+ */
+int http_config_wait_connections_close(HttpConfig *config, int max_wait_ms);
+
+/**
+ * 部分更新配置（仅更新指定字段）
+ * @param config HttpConfig 指针
+ * @param file_path 新配置文件路径
+ * @param update_fields 需更新的字段名列表
+ * @param field_count 字段数量
+ * @return 0 成功，-1 失败
+ */
+int http_config_partial_update(HttpConfig *config, const char *file_path,
+                               const char **update_fields, int field_count);
+
+/**
+ * 配置回滚到上一版本
+ * @param config HttpConfig 指针
+ * @return 0 成功，-1 无历史版本
+ */
+int http_config_rollback(HttpConfig *config);
+
+/**
+ * 释放更新结果
+ * @param result ConfigUpdateResult 指针
+ */
+void http_config_update_result_free(ConfigUpdateResult *result);
 
 #ifdef __cplusplus
 }

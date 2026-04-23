@@ -57,6 +57,8 @@ set(CHASE_CORE_HEADERS
     include/ssl_wrap.h
     include/vhost.h
     include/config.h
+    include/logger.h       # Phase 5: Logger module
+    include/security.h     # Phase 5: Security module
 )
 
 set(CHASE_CORE_SOURCES
@@ -79,6 +81,8 @@ set(CHASE_CORE_SOURCES
     src/ssl_wrap.c
     src/vhost.c
     src/config.c
+    src/logger.c          # Phase 5: Logger module
+    src/security.c        # Phase 5: Security module
 )
 
 # 创建核心库

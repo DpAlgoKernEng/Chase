@@ -6,11 +6,12 @@
  *          - 封装 EventLoop、Router、监听 Socket
  *          - 处理 Accept、HTTP 解析、路由匹配、响应发送
  *          - 支持 SO_REUSEPORT 多进程架构
+ *          - Phase 5: Security 防护和 Logger 日志集成
  *          - 一行代码启动服务器
  *
  * @layer   Server Layer
  *
- * @depends eventloop, connection, http_parser, router, socket, response, handler
+ * @depends eventloop, connection, http_parser, router, socket, response, handler, security, logger
  * @usedby  worker, examples
  *
  * @author  minghui.liu
@@ -29,6 +30,11 @@
 extern "C" {
 #endif
 
+/* 前向声明 Phase 5 模块 */
+typedef struct Security Security;
+typedef struct Logger Logger;
+typedef struct IpAddress IpAddress;
+
 /**
  * Server 配置结构
  */
@@ -46,6 +52,10 @@ typedef struct ServerConfig {
     int connection_timeout_ms;  /* 连接空闲超时（毫秒，默认 60000） */
     int keepalive_timeout_ms;   /* Keep-Alive 超时（毫秒，默认 5000） */
     int max_keepalive_requests; /* 单连接最大请求数（默认 100，0=无限制） */
+
+    /* Phase 5: Security 和 Logger */
+    Security *security;         /* Security 实例（可选） */
+    Logger *logger;             /* Logger 实例（可选） */
 } ServerConfig;
 
 /**
@@ -100,6 +110,20 @@ EventLoop *server_get_eventloop(Server *server);
  * @return Router 指针
  */
 Router *server_get_router(Server *server);
+
+/**
+ * 获取 Server 的 Security 实例
+ * @param server Server 指针
+ * @return Security 指针，未配置返回 NULL
+ */
+Security *server_get_security(Server *server);
+
+/**
+ * 获取 Server 的 Logger 实例
+ * @param server Server 指针
+ * @return Logger 指针，未配置返回 NULL
+ */
+Logger *server_get_logger(Server *server);
 
 #ifdef __cplusplus
 }

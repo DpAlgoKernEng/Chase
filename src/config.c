@@ -6,6 +6,7 @@
  *          - 简化 JSON 解析（手动解析，无外部依赖）
  *          - 配置验证
  *          - 默认值设置
+ *          - Phase 5: 热更新支持（版本追踪、checksum、原子/渐进更新）
  *
  * @author  minghui.liu
  * @date    2026-04-22
@@ -16,6 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>  /* Phase 5: 用于等待连接关闭 */
 
 /* ========== 辅助函数 ========== */
 
@@ -121,6 +125,16 @@ HttpConfig *http_config_create_default(void) {
     config->vhost_manager = NULL;
     config->config_file_path = NULL;
     config->from_file = false;
+
+    /* Phase 5: 热更新字段初始化 */
+    config->version.version = 1;
+    config->version.checksum = 0;
+    config->version.timestamp = 0;
+    config->version.source_file = NULL;
+    config->update_policy = CONFIG_UPDATE_ATOMIC;
+    config->hot_update_enabled = false;
+    config->active_connections = 0;
+    config->last_update_time = 0;
 
     return config;
 }
@@ -342,4 +356,275 @@ int http_config_merge(HttpConfig *dst, HttpConfig *src) {
     }
 
     return 0;
+}
+
+/* ========== Phase 5: 热更新实现 ========== */
+
+/* 获取当前时间戳（毫秒） */
+static uint64_t get_current_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* 简化的 checksum 计算（基于配置字符串拼接） */
+static uint64_t calculate_config_hash(HttpConfig *config) {
+    if (!config) return 0;
+
+    /* 拼接关键配置字段 */
+    char buffer[1024];
+    int len = snprintf(buffer, sizeof(buffer),
+                       "port=%d,max_conn=%d,timeout=%d,keepalive=%d,ssl=%d",
+                       config->port,
+                       config->max_connections,
+                       config->connection_timeout_ms,
+                       config->keepalive_timeout_ms,
+                       config->ssl_enabled ? 1 : 0);
+
+    /* 简化的哈希计算 */
+    uint64_t hash = 0;
+    for (int i = 0; i < len; i++) {
+        hash = hash * 31 + (unsigned char)buffer[i];
+    }
+
+    return hash;
+}
+
+int http_config_enable_hot_update(HttpConfig *config, ConfigUpdatePolicy policy) {
+    if (!config) return -1;
+
+    config->hot_update_enabled = true;
+    config->update_policy = policy;
+    config->version.version = 1;
+    config->version.timestamp = get_current_ms();
+    config->version.checksum = calculate_config_hash(config);
+
+    return 0;
+}
+
+uint64_t http_config_get_version(HttpConfig *config) {
+    if (!config) return 0;
+    return config->version.version;
+}
+
+uint64_t http_config_calculate_checksum(HttpConfig *config) {
+    if (!config) return 0;
+    return calculate_config_hash(config);
+}
+
+bool http_config_has_changed(HttpConfig *config, const char *file_path) {
+    if (!config || !file_path) return false;
+
+    /* 加载新配置文件 */
+    ConfigLoadOptions options = { .validate_required = false, .load_defaults = true };
+    HttpConfig *new_config = http_config_load_from_file(file_path, &options);
+    if (!new_config) return false;
+
+    /* 计算新配置的 checksum */
+    uint64_t new_checksum = calculate_config_hash(new_config);
+
+    http_config_destroy(new_config);
+
+    /* 比较 checksum */
+    return (new_checksum != config->version.checksum);
+}
+
+int http_config_calculate_update_delay(HttpConfig *config, int active_connections) {
+    if (!config) return 0;
+
+    /* 原子更新：立即生效 */
+    if (config->update_policy == CONFIG_UPDATE_ATOMIC) {
+        return 0;
+    }
+
+    /* 渐进更新：根据活跃连接数计算延迟 */
+    /* 基础延迟 + 每连接额外延迟 */
+    int base_delay = 100;  /* 100ms 基础 */
+    int per_conn_delay = 10;  /* 每连接 10ms */
+
+    int delay = base_delay + (active_connections * per_conn_delay);
+
+    /* 限制最大延迟为 keepalive timeout */
+    if (delay > config->keepalive_timeout_ms) {
+        delay = config->keepalive_timeout_ms;
+    }
+
+    return delay;
+}
+
+void http_config_register_connection(HttpConfig *config) {
+    if (!config) return;
+    config->active_connections++;
+}
+
+void http_config_unregister_connection(HttpConfig *config) {
+    if (!config) return;
+    if (config->active_connections > 0) {
+        config->active_connections--;
+    }
+}
+
+int http_config_wait_connections_close(HttpConfig *config, int max_wait_ms) {
+    if (!config) return -1;
+
+    int waited = 0;
+    int check_interval = 100;  /* 100ms 检查间隔 */
+
+    while (config->active_connections > 0 && waited < max_wait_ms) {
+        usleep(check_interval * 1000);
+        waited += check_interval;
+    }
+
+    return (config->active_connections == 0) ? 0 : -1;
+}
+
+int http_config_hot_update(HttpConfig *config, const char *file_path, ConfigUpdateResult *result) {
+    if (!config || !file_path) return -1;
+
+    /* 初始化结果 */
+    if (result) {
+        memset(result, 0, sizeof(ConfigUpdateResult));
+        result->old_version = config->version.version;
+        result->active_connections = config->active_connections;
+    }
+
+    /* 检查是否启用热更新 */
+    if (!config->hot_update_enabled) {
+        if (result) {
+            result->success = false;
+            result->error_message = strdup("Hot update not enabled");
+        }
+        return -1;
+    }
+
+    /* 检查是否有变更 */
+    if (!http_config_has_changed(config, file_path)) {
+        if (result) {
+            result->success = true;
+            result->new_version = config->version.version;
+            result->delay_ms = 0;
+        }
+        return 0;  /* 无变更 */
+    }
+
+    /* 加载新配置 */
+    ConfigLoadOptions options = { .validate_required = true, .load_defaults = true };
+    HttpConfig *new_config = http_config_load_from_file(file_path, &options);
+    if (!new_config) {
+        if (result) {
+            result->success = false;
+            result->error_message = strdup("Failed to load new config");
+        }
+        return -1;
+    }
+
+    /* 验证新配置 */
+    int ret = http_config_validate(new_config);
+    if (ret != CONFIG_OK) {
+        if (result) {
+            result->success = false;
+            result->error_message = strdup(http_config_get_error_string(ret));
+        }
+        http_config_destroy(new_config);
+        return -1;
+    }
+
+    /* 根据更新策略执行更新 */
+    int delay = http_config_calculate_update_delay(config, config->active_connections);
+    if (result) {
+        result->delay_ms = delay;
+    }
+
+    /* 渐进更新：等待连接关闭 */
+    if (config->update_policy == CONFIG_UPDATE_GRADUAL && config->active_connections > 0) {
+        int wait_result = http_config_wait_connections_close(config,
+            config->keepalive_timeout_ms + delay);
+        if (wait_result != 0 && config->active_connections > 0) {
+            /* 超时，仍有活跃连接，可选继续或回退 */
+            /* 这里选择继续更新 */
+        }
+    }
+
+    /* 合并新配置 */
+    http_config_merge(config, new_config);
+
+    /* 更新版本信息 */
+    config->version.version++;
+    config->version.checksum = calculate_config_hash(config);
+    config->version.timestamp = get_current_ms();
+    if (config->version.source_file) {
+        free(config->version.source_file);
+    }
+    config->version.source_file = strdup_safe(file_path);
+    config->last_update_time = config->version.timestamp;
+
+    if (result) {
+        result->success = true;
+        result->new_version = config->version.version;
+    }
+
+    http_config_destroy(new_config);
+    return 0;
+}
+
+int http_config_partial_update(HttpConfig *config, const char *file_path,
+                               const char **update_fields, int field_count) {
+    if (!config || !file_path || !update_fields || field_count <= 0) return -1;
+
+    /* 加载新配置 */
+    ConfigLoadOptions options = { .validate_required = false, .load_defaults = false };
+    HttpConfig *new_config = http_config_load_from_file(file_path, &options);
+    if (!new_config) return -1;
+
+    /* 只更新指定字段 */
+    for (int i = 0; i < field_count; i++) {
+        const char *field = update_fields[i];
+
+        if (strcmp(field, "port") == 0 && new_config->port > 0) {
+            config->port = new_config->port;
+        } else if (strcmp(field, "max_connections") == 0 && new_config->max_connections > 0) {
+            config->max_connections = new_config->max_connections;
+        } else if (strcmp(field, "connection_timeout_ms") == 0 && new_config->connection_timeout_ms > 0) {
+            config->connection_timeout_ms = new_config->connection_timeout_ms;
+        } else if (strcmp(field, "keepalive_timeout_ms") == 0 && new_config->keepalive_timeout_ms > 0) {
+            config->keepalive_timeout_ms = new_config->keepalive_timeout_ms;
+        } else if (strcmp(field, "max_keepalive_requests") == 0 && new_config->max_keepalive_requests > 0) {
+            config->max_keepalive_requests = new_config->max_keepalive_requests;
+        } else if (strcmp(field, "backlog") == 0 && new_config->backlog > 0) {
+            config->backlog = new_config->backlog;
+        }
+        /* SSL 字段需要单独处理 */
+    }
+
+    /* 更新版本信息 */
+    config->version.version++;
+    config->version.checksum = calculate_config_hash(config);
+    config->version.timestamp = get_current_ms();
+
+    http_config_destroy(new_config);
+    return 0;
+}
+
+int http_config_rollback(HttpConfig *config) {
+    if (!config) return -1;
+
+    /* 简化实现：版本号回退 */
+    /* 完整实现需要保存历史版本 */
+    if (config->version.version <= 1) {
+        return -1;  /* 无历史版本 */
+    }
+
+    /* 这里只是演示，实际需要保存完整的配置历史 */
+    config->version.version--;
+
+    return 0;
+}
+
+void http_config_update_result_free(ConfigUpdateResult *result) {
+    if (!result) return;
+
+    if (result->error_message) {
+        free(result->error_message);
+        result->error_message = NULL;
+    }
 }

@@ -31,11 +31,22 @@ set(TEST_SOURCES_PHASE3
     integration/c_core/test_range.c
 )
 
-# 测试源文件 - Phase 4 SSL + VHost + Config 测试
+# 测试源文件 - Phase 5 P1 Router Regex + Config Hot Update
+set(TEST_SOURCES_PHASE5_P1
+    integration/c_core/test_regex_router.c
+    integration/c_core/test_hot_config.c
+)
 set(TEST_SOURCES_PHASE4
     integration/c_core/test_vhost.c
     integration/c_core/test_config.c
     integration/c_core/test_ssl_wrap.c
+)
+
+# 测试源文件 - Phase 5 Logger + Security + Gzip 测试
+set(TEST_SOURCES_PHASE5_P0
+    integration/c_core/test_logger.c
+    integration/c_core/test_security.c
+    integration/c_core/test_gzip.c
 )
 
 # 测试源文件 - Phase 1 + Phase 2 联合测试
@@ -49,6 +60,8 @@ set(TEST_SOURCES
     ${TEST_SOURCES_PHASE2}
     ${TEST_SOURCES_PHASE3}
     ${TEST_SOURCES_PHASE4}
+    ${TEST_SOURCES_PHASE5_P0}
+    ${TEST_SOURCES_PHASE5_P1}
     ${TEST_SOURCES_INTEGRATION}
 )
 

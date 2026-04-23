@@ -28,6 +28,8 @@
 #include "buffer.h"
 #include "error.h"
 #include "timer.h"
+#include "security.h"
+#include "logger.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +43,7 @@
 #include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>  /* Phase 5: for inet_ntop */
 
 /* 默认配置 */
 #define DEFAULT_MAX_CONNECTIONS  1024
@@ -52,6 +55,20 @@
 #define DEFAULT_CONNECTION_TIMEOUT_MS  60000   /* 60s */
 #define DEFAULT_KEEPALIVE_TIMEOUT_MS   5000    /* 5s */
 #define DEFAULT_MAX_KEEPALIVE_REQUESTS 100     /* 100 requests */
+
+/* Phase 5: HttpMethod 转 string */
+static const char *http_method_to_string(HttpMethod method) {
+    switch (method) {
+        case HTTP_GET:     return "GET";
+        case HTTP_POST:    return "POST";
+        case HTTP_PUT:     return "PUT";
+        case HTTP_DELETE:  return "DELETE";
+        case HTTP_HEAD:    return "HEAD";
+        case HTTP_OPTIONS: return "OPTIONS";
+        case HTTP_PATCH:   return "PATCH";
+        default:           return "UNKNOWN";
+    }
+}
 
 /* 连接上下文（每个 HTTP 连接的解析状态） */
 typedef struct ConnCtx {
@@ -69,6 +86,10 @@ typedef struct ConnCtx {
     Timer *timeout_timer;            /* 连接超时定时器 */
     int request_count;               /* 已处理的请求数 */
     bool keepalive;                  /* 是否启用 Keep-Alive */
+
+    /* Phase 5: Security 和 Logger 支持 */
+    IpAddress client_ip;             /* 客户端 IP 地址 */
+    uint64_t request_start_ms;       /* 请求开始时间（延迟计算） */
 } ConnCtx;
 
 /* Server 结构体 */
@@ -131,6 +152,10 @@ static ConnCtx *connctx_create(Server *server) {
     ctx->request_count = 0;
     ctx->keepalive = true;  /* 默认启用 Keep-Alive */
 
+    /* Phase 5: Security 和 Logger 初始化 */
+    memset(&ctx->client_ip, 0, sizeof(IpAddress));
+    ctx->request_start_ms = 0;
+
     if (!ctx->parser || !ctx->request) {
         http_parser_destroy(ctx->parser);
         http_request_destroy(ctx->request);
@@ -167,6 +192,10 @@ static void connctx_destroy(ConnCtx *ctx) {
 static void on_connection_close(int fd, void *user_data) {
     ConnCtx *ctx = (ConnCtx *)user_data;
     if (ctx) {
+        /* Phase 5: Security 移除连接 */
+        if (ctx->server && ctx->server->config.security) {
+            security_remove_connection(ctx->server->config.security, &ctx->client_ip);
+        }
         connctx_destroy(ctx);
     }
 }
@@ -420,11 +449,60 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
 
         buffer[n] = '\0';
 
+        /* Phase 5: Security 速率检查 */
+        Security *security = server->config.security;
+        if (security) {
+            SecurityResult sec_result = security_check_request_rate(security, &ctx->client_ip, n);
+            if (sec_result != SECURITY_OK) {
+                char ip_str[64];
+                security_ip_to_string(&ctx->client_ip, ip_str, sizeof(ip_str));
+
+                /* 记录速率限制事件 */
+                if (server->config.logger) {
+                    SecurityLogContext sec_ctx = {
+                        .event_type = sec_result == SECURITY_RATE_LIMITED ? "rate_limit" :
+                                      sec_result == SECURITY_SLOWLORIS ? "slowloris" :
+                                      sec_result == SECURITY_BLOCKED_IP ? "blocked_ip" : "unknown",
+                        .client_ip = ip_str,
+                        .details = "Request rejected during read",
+                        .severity = sec_result == SECURITY_SLOWLORIS ? 4 : 3,
+                        .blocked = true
+                    };
+                    logger_log_security(server->config.logger, &sec_ctx);
+                }
+
+                /* 速率限制响应 */
+                const char *error_resp = sec_result == SECURITY_RATE_LIMITED ?
+                    "HTTP/1.1 429 Too Many Requests\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 19\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "Rate limit exceeded" :
+                    "HTTP/1.1 403 Forbidden\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 15\r\n"
+                    "Connection: close\r\n"
+                    "\r\n"
+                    "Access blocked";
+                write(fd, error_resp, strlen(error_resp));
+                stop_connection_timeout(ctx);
+                eventloop_remove(server->loop, fd);
+                close(fd);
+                connctx_destroy(ctx);
+                return;
+            }
+        }
+
         /* 解析 HTTP 请求 */
         size_t consumed = 0;
         ParseResult result = http_parser_parse(ctx->parser, ctx->request, buffer, n, &consumed);
 
         if (result == PARSE_COMPLETE) {
+            /* Phase 5: 记录请求开始时间 */
+            uint64_t request_end_ms = logger_get_current_ms();
+            uint64_t latency_ms = request_end_ms - ctx->request_start_ms;
+
             /* Phase 3.3: HTTP/1.1 合规 - Host 头必需验证 */
             if (ctx->request->version && strncmp(ctx->request->version, "HTTP/1.1", 8) == 0) {
                 const char *host = http_request_get_header_value(ctx->request, "Host");
@@ -480,6 +558,24 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
             /* 使用扩展发送函数 */
             ResponseSendResult send_result = response_send_ex(resp, fd);
 
+            /* Phase 5: 记录请求日志 */
+            if (server->config.logger && send_result.status != RESPONSE_SEND_ERROR) {
+                char ip_str[64];
+                security_ip_to_string(&ctx->client_ip, ip_str, sizeof(ip_str));
+
+                RequestLogContext log_ctx = {
+                    .method = http_method_to_string(ctx->request->method),
+                    .path = ctx->request->path ? ctx->request->path : "/",
+                    .query = ctx->request->query,
+                    .status_code = response_get_status(resp),
+                    .latency_ms = latency_ms,
+                    .client_ip = ip_str,
+                    .bytes_sent = send_result.bytes_sent,
+                    .bytes_received = n
+                };
+                logger_log_request(server->config.logger, &log_ctx);
+            }
+
             if (send_result.status == RESPONSE_SEND_COMPLETE) {
                 response_destroy(resp);
 
@@ -487,6 +583,8 @@ static void on_connection_read(int fd, uint32_t events, void *user_data) {
                 if (ctx->keepalive) {
                     /* 准备下一个请求 */
                     prepare_for_next_request(ctx, fd, server);
+                    /* Phase 5: 重置请求开始时间 */
+                    ctx->request_start_ms = logger_get_current_ms();
                     /* 保持连接打开，继续等待读事件 */
                 } else {
                     /* 关闭连接 */
@@ -568,18 +666,85 @@ static void on_accept(int fd, uint32_t events, void *user_data) {
             break;
         }
 
+        /* Phase 5: Security 检查 */
+        IpAddress client_ip;
+        if (security_parse_ip((struct sockaddr *)&client_addr, &client_ip) != 0) {
+            /* 无法解析 IP，关闭连接 */
+            close(client_fd);
+            continue;
+        }
+
+        /* 检查连接是否允许 */
+        Security *security = server->config.security;
+        if (security) {
+            SecurityResult sec_result = security_check_connection(security, &client_ip);
+            if (sec_result != SECURITY_OK) {
+                /* 连接被拒绝 */
+                char ip_str[64];
+                security_ip_to_string(&client_ip, ip_str, sizeof(ip_str));
+
+                /* 记录安全事件 */
+                if (server->config.logger) {
+                    SecurityLogContext sec_ctx = {
+                        .event_type = sec_result == SECURITY_BLOCKED_IP ? "blocked_ip" :
+                                      sec_result == SECURITY_TOO_MANY_CONN ? "connection_limit" :
+                                      sec_result == SECURITY_RATE_LIMITED ? "rate_limit" : "unknown",
+                        .client_ip = ip_str,
+                        .details = "Connection rejected on accept",
+                        .severity = 3,
+                        .blocked = true
+                    };
+                    logger_log_security(server->config.logger, &sec_ctx);
+                }
+
+                close(client_fd);
+                continue;
+            }
+
+            /* 记录新连接 */
+            sec_result = security_add_connection(security, &client_ip);
+            if (sec_result != SECURITY_OK) {
+                /* 超过连接限制 */
+                char ip_str[64];
+                security_ip_to_string(&client_ip, ip_str, sizeof(ip_str));
+
+                if (server->config.logger) {
+                    SecurityLogContext sec_ctx = {
+                        .event_type = "connection_limit",
+                        .client_ip = ip_str,
+                        .details = "Too many connections from this IP",
+                        .severity = 2,
+                        .blocked = true
+                    };
+                    logger_log_security(server->config.logger, &sec_ctx);
+                }
+
+                close(client_fd);
+                continue;
+            }
+        }
+
         /* 设置非阻塞 */
         socket_set_nonblock(client_fd);
 
         /* 创建连接上下文 */
         ConnCtx *ctx = connctx_create(server);
         if (!ctx) {
+            if (security) {
+                security_remove_connection(security, &client_ip);
+            }
             close(client_fd);
             continue;
         }
 
         /* Phase 3: 设置 fd */
         ctx->fd = client_fd;
+
+        /* Phase 5: 存储 client IP */
+        ctx->client_ip = client_ip;
+
+        /* Phase 5: 记录请求开始时间 */
+        ctx->request_start_ms = logger_get_current_ms();
 
         /* Phase 3: 启动连接超时定时器 */
         int timeout_ms = server->config.connection_timeout_ms > 0 ?
@@ -816,4 +981,14 @@ EventLoop *server_get_eventloop(Server *server) {
 Router *server_get_router(Server *server) {
     if (!server) return NULL;
     return server->router;
+}
+
+Security *server_get_security(Server *server) {
+    if (!server) return NULL;
+    return server->config.security;
+}
+
+Logger *server_get_logger(Server *server) {
+    if (!server) return NULL;
+    return server->config.logger;
 }

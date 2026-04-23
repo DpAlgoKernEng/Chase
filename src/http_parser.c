@@ -6,10 +6,11 @@
  *          - 增量式状态机解析
  *          - 支持流式输入
  *          - 解析请求行、头部、响应体
+ *          - Phase 5: gzip/deflate 解压和 Zip Bomb 检测
  *
  * @layer   Core Layer
  *
- * @depends 无依赖
+ * @depends zlib (Phase 5)
  * @usedby  server, handler, router
  *
  * @author  minghui.liu
@@ -22,6 +23,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <errno.h>
+#include <zlib.h>  /* Phase 5: gzip/deflate 解压 */
 
 /* 解析状态（增量状态机） */
 typedef enum {
@@ -93,6 +95,10 @@ struct HttpParser {
     int chunk_size_capacity;
     size_t chunk_size;           /* 当前 chunk 大小 */
     size_t chunk_received;       /* 当前 chunk 已接收字节数 */
+
+    /* Phase 5: 解压配置 */
+    DecompressConfig decompress_config;
+    bool decompress_config_set;  /* 是否已设置解压配置 */
 };
 
 /* ========== 辅助函数 ========== */
@@ -250,6 +256,13 @@ HttpParser *http_parser_create(void) {
     parser->chunk_size = 0;
     parser->chunk_received = 0;
 
+    /* Phase 5: 解压配置初始化（使用默认值） */
+    parser->decompress_config.max_decompressed_size = DECOMPRESS_DEFAULT_MAX_SIZE;
+    parser->decompress_config.max_ratio = DECOMPRESS_DEFAULT_MAX_RATIO;
+    parser->decompress_config.enable_gzip = true;
+    parser->decompress_config.enable_deflate = true;
+    parser->decompress_config_set = false;
+
     if (!parser->method_buf || !parser->path_buf || !parser->query_buf ||
         !parser->version_buf || !parser->header_name_buf || !parser->header_value_buf ||
         !parser->chunk_size_buf) {
@@ -288,6 +301,11 @@ HttpRequest *http_request_create(void) {
     req->content_length = 0;
     req->is_chunked = false;        /* Phase 3: Chunked 编码 */
     req->chunk_body_capacity = 0;   /* Phase 3: Chunked body 缓冲区 */
+    /* Phase 5: 解压相关字段初始化 */
+    req->needs_decompression = false;
+    req->content_encoding = NULL;
+    req->decompress_result = DECOMPRESS_NOT_NEEDED;
+    req->original_body_size = 0;
 
     if (!req->headers) {
         free(req);
@@ -817,4 +835,261 @@ void http_parser_reset(HttpParser *parser) {
     if (parser->chunk_size_buf) parser->chunk_size_buf[0] = '\0';
     parser->chunk_size = 0;
     parser->chunk_received = 0;
+}
+
+/* ========== Phase 5: Gzip/Deflate 解压实现 ========== */
+
+int http_parser_set_decompress_config(HttpParser *parser, const DecompressConfig *config) {
+    if (!parser || !config) return -1;
+
+    parser->decompress_config = *config;
+    parser->decompress_config_set = true;
+
+    /* 设置合理的默认值 */
+    if (parser->decompress_config.max_decompressed_size <= 0) {
+        parser->decompress_config.max_decompressed_size = DECOMPRESS_DEFAULT_MAX_SIZE;
+    }
+    if (parser->decompress_config.max_ratio <= 0) {
+        parser->decompress_config.max_ratio = DECOMPRESS_DEFAULT_MAX_RATIO;
+    }
+
+    return 0;
+}
+
+const char *http_request_get_content_encoding(HttpRequest *req) {
+    if (!req) return NULL;
+
+    /* 如果已经缓存，直接返回 */
+    if (req->content_encoding) {
+        return req->content_encoding;
+    }
+
+    /* 从头部获取 */
+    return http_request_get_header_value(req, "Content-Encoding");
+}
+
+bool http_request_needs_decompression(HttpRequest *req) {
+    if (!req) return false;
+
+    /* 已经标记 */
+    if (req->needs_decompression) {
+        return true;
+    }
+
+    /* 检查 Content-Encoding 头部 */
+    const char *encoding = http_request_get_content_encoding(req);
+    if (!encoding) {
+        return false;
+    }
+
+    /* 检查是否支持 gzip 或 deflate */
+    if (strstr(encoding, "gzip") != NULL || strstr(encoding, "deflate") != NULL) {
+        req->needs_decompression = true;
+        return true;
+    }
+
+    return false;
+}
+
+bool http_detect_zip_bomb(size_t original_size, size_t decompressed_size, double max_ratio) {
+    if (original_size == 0) {
+        /* 原始大小为 0，解压后有数据 → 肯定是 zip bomb */
+        return decompressed_size > 0;
+    }
+
+    double ratio = (double)decompressed_size / (double)original_size;
+    return ratio > max_ratio;
+}
+
+DecompressResult http_request_decompress_body(HttpRequest *req, HttpParser *parser) {
+    if (!req || !parser) return DECOMPRESS_ERROR;
+
+    /* 检查是否需要解压 */
+    if (!http_request_needs_decompression(req)) {
+        return DECOMPRESS_NOT_NEEDED;
+    }
+
+    /* 检查是否有 body */
+    if (!req->body || req->body_length == 0) {
+        return DECOMPRESS_NOT_NEEDED;
+    }
+
+    const char *encoding = http_request_get_content_encoding(req);
+    if (!encoding) {
+        return DECOMPRESS_NOT_NEEDED;
+    }
+
+    /* 记录原始大小 */
+    req->original_body_size = req->body_length;
+
+    /* 获取配置 */
+    size_t max_size = parser->decompress_config.max_decompressed_size;
+    double max_ratio = parser->decompress_config.max_ratio;
+
+    /* 分配解压缓冲区 */
+    size_t buf_capacity = req->body_length * 4;  /* 初始估计 4x 扩展 */
+    if (buf_capacity < 1024) buf_capacity = 1024;
+    if (buf_capacity > max_size) buf_capacity = max_size;
+
+    char *decompressed = malloc(buf_capacity);
+    if (!decompressed) {
+        return DECOMPRESS_ERROR;
+    }
+
+    size_t decompressed_len = 0;
+    DecompressResult result = DECOMPRESS_ERROR;
+
+    /* 判断编码类型并解压 */
+    if (strstr(encoding, "gzip") != NULL && parser->decompress_config.enable_gzip) {
+        /* gzip 解压 */
+        z_stream strm;
+        memset(&strm, 0, sizeof(strm));
+
+        /* 初始化 gzip 解压（windowBits = 15 + 16 表示 gzip 格式） */
+        int ret = inflateInit2(&strm, 15 + 16);
+        if (ret != Z_OK) {
+            free(decompressed);
+            return DECOMPRESS_ERROR;
+        }
+
+        strm.next_in = (Bytef *)req->body;
+        strm.avail_in = req->body_length;
+
+        /* 循环解压 */
+        while (ret != Z_STREAM_END) {
+            /* 检查缓冲区容量 */
+            if (decompressed_len >= buf_capacity) {
+                /* 扩展缓冲区 */
+                size_t new_cap = buf_capacity * 2;
+                if (new_cap > max_size) {
+                    new_cap = max_size;
+                    if (decompressed_len >= max_size) {
+                        /* 已达到最大大小 */
+                        inflateEnd(&strm);
+                        free(decompressed);
+                        return DECOMPRESS_SIZE_EXCEEDED;
+                    }
+                }
+                char *new_buf = realloc(decompressed, new_cap);
+                if (!new_buf) {
+                    inflateEnd(&strm);
+                    free(decompressed);
+                    return DECOMPRESS_ERROR;
+                }
+                decompressed = new_buf;
+                buf_capacity = new_cap;
+            }
+
+            strm.next_out = (Bytef *)(decompressed + decompressed_len);
+            strm.avail_out = buf_capacity - decompressed_len;
+
+            ret = inflate(&strm, Z_NO_FLUSH);
+
+            if (ret == Z_DATA_ERROR || ret == Z_MEM_ERROR || ret == Z_BUF_ERROR) {
+                inflateEnd(&strm);
+                free(decompressed);
+                return DECOMPRESS_ERROR;
+            }
+
+            /* 输入耗尽但未完成 → 数据不完整 */
+            if (strm.avail_in == 0 && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+                /* 如果inflate返回Z_OK但输入耗尽，说明数据不完整 */
+                inflateEnd(&strm);
+                free(decompressed);
+                return DECOMPRESS_ERROR;
+            }
+
+            decompressed_len = strm.total_out;
+        }
+
+        inflateEnd(&strm);
+        result = DECOMPRESS_OK;
+
+    } else if (strstr(encoding, "deflate") != NULL && parser->decompress_config.enable_deflate) {
+        /* deflate 解压（raw deflate，无 zlib header） */
+        z_stream strm;
+        memset(&strm, 0, sizeof(strm));
+
+        /* 初始化 deflate 解压（windowBits = -15 表示 raw deflate） */
+        int ret = inflateInit2(&strm, -15);
+        if (ret != Z_OK) {
+            free(decompressed);
+            return DECOMPRESS_ERROR;
+        }
+
+        strm.next_in = (Bytef *)req->body;
+        strm.avail_in = req->body_length;
+
+        /* 循环解压 */
+        while (ret != Z_STREAM_END) {
+            /* 检查缓冲区容量 */
+            if (decompressed_len >= buf_capacity) {
+                size_t new_cap = buf_capacity * 2;
+                if (new_cap > max_size) {
+                    new_cap = max_size;
+                    if (decompressed_len >= max_size) {
+                        inflateEnd(&strm);
+                        free(decompressed);
+                        return DECOMPRESS_SIZE_EXCEEDED;
+                    }
+                }
+                char *new_buf = realloc(decompressed, new_cap);
+                if (!new_buf) {
+                    inflateEnd(&strm);
+                    free(decompressed);
+                    return DECOMPRESS_ERROR;
+                }
+                decompressed = new_buf;
+                buf_capacity = new_cap;
+            }
+
+            strm.next_out = (Bytef *)(decompressed + decompressed_len);
+            strm.avail_out = buf_capacity - decompressed_len;
+
+            ret = inflate(&strm, Z_NO_FLUSH);
+
+            if (ret == Z_DATA_ERROR || ret == Z_MEM_ERROR || ret == Z_BUF_ERROR) {
+                inflateEnd(&strm);
+                free(decompressed);
+                return DECOMPRESS_ERROR;
+            }
+
+            /* 输入耗尽但未完成 → 数据不完整 */
+            if (strm.avail_in == 0 && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+                inflateEnd(&strm);
+                free(decompressed);
+                return DECOMPRESS_ERROR;
+            }
+
+            decompressed_len = strm.total_out;
+        }
+
+        inflateEnd(&strm);
+        result = DECOMPRESS_OK;
+
+    } else {
+        /* 不支持的编码 */
+        free(decompressed);
+        return DECOMPRESS_NOT_NEEDED;
+    }
+
+    /* Zip Bomb 检测 */
+    if (http_detect_zip_bomb(req->original_body_size, decompressed_len, max_ratio)) {
+        free(decompressed);
+        req->decompress_result = DECOMPRESS_ZIP_BOMB;
+        return DECOMPRESS_ZIP_BOMB;
+    }
+
+    /* 替换原始 body */
+    free(req->body);
+    req->body = decompressed;
+    req->body_length = decompressed_len;
+    req->decompress_result = result;
+
+    /* null terminate */
+    if (req->body_length < buf_capacity) {
+        req->body[req->body_length] = '\0';
+    }
+
+    return result;
 }
