@@ -54,6 +54,13 @@ set(TEST_SOURCES_INTEGRATION
     integration/c_core/test_phase1_phase2_integration.c
 )
 
+# 测试源文件 - Race Condition 测试
+set(TEST_SOURCES_RACE
+    integration/c_core/test_race_connection_pool.c
+    integration/c_core/test_race_security.c
+    integration/c_core/test_race_timer.c
+)
+
 # 合并所有测试
 set(TEST_SOURCES
     ${TEST_SOURCES_PHASE1}
@@ -63,6 +70,7 @@ set(TEST_SOURCES
     ${TEST_SOURCES_PHASE5_P0}
     ${TEST_SOURCES_PHASE5_P1}
     ${TEST_SOURCES_INTEGRATION}
+    ${TEST_SOURCES_RACE}
 )
 
 # 创建测试可执行文件

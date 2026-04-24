@@ -15,6 +15,7 @@ option(ENABLE_TESTS "Enable unit tests" ON)
 option(ENABLE_COVERAGE "Enable code coverage" OFF)
 option(ENABLE_EXAMPLES "Build example programs" ON)
 option(ENABLE_VALGRIND "Enable Valgrind memory check" ON)
+option(ENABLE_TSAN "Enable ThreadSanitizer for race detection" OFF)
 
 # 查找依赖
 find_package(OpenSSL REQUIRED)
@@ -33,6 +34,15 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
             add_compile_options(-fprofile-arcs -ftest-coverage)
             add_link_options(-fprofile-arcs -ftest-coverage)
         endif()
+    endif()
+    if(ENABLE_TSAN)
+        # ThreadSanitizer 配置
+        # 注意: TSan 与 Coverage 不能同时启用
+        add_compile_options(-fsanitize=thread -g -O1)
+        add_link_options(-fsanitize=thread)
+        message(STATUS "ThreadSanitizer enabled for race detection")
+        message(STATUS "Note: TSan requires -O1 or lower optimization")
+        message(STATUS "Note: TSan conflicts with Coverage, disable ENABLE_COVERAGE")
     endif()
 endif()
 
@@ -125,6 +135,7 @@ message(STATUS "Tests: ${ENABLE_TESTS}")
 message(STATUS "Coverage: ${ENABLE_COVERAGE}")
 message(STATUS "Examples: ${ENABLE_EXAMPLES}")
 message(STATUS "Valgrind: ${ENABLE_VALGRIND}")
+message(STATUS "ThreadSanitizer: ${ENABLE_TSAN}")
 
 # Valgrind 内存检测目标
 if(ENABLE_VALGRIND AND ENABLE_TESTS)
@@ -140,4 +151,30 @@ if(ENABLE_VALGRIND AND ENABLE_TESTS)
     else()
         message(STATUS "Valgrind not found - valgrind target disabled")
     endif()
+endif()
+
+# 覆盖率报告目标
+if(ENABLE_COVERAGE AND ENABLE_TESTS)
+    add_custom_target(coverage
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/coverage_report.sh ${CMAKE_BINARY_DIR}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Generating code coverage report"
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/coverage_report.sh
+        VERBATIM
+    )
+
+    # 覆盖率清理目标
+    add_custom_target(coverage-clean
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/coverage
+        COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/*.profraw
+        COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/coverage.profdata
+        COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/coverage.info
+        COMMAND ${CMAKE_COMMAND} -E remove -f ${CMAKE_BINARY_DIR}/coverage_text.txt
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Cleaning coverage data"
+        VERBATIM
+    )
+
+    message(STATUS "Coverage target: make coverage")
+    message(STATUS "Coverage clean target: make coverage-clean")
 endif()

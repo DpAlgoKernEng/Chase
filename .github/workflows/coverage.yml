@@ -1,0 +1,138 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  coverage-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.01.12'
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build lcov
+
+      - name: Configure with Coverage
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_COVERAGE=ON \
+            -DENABLE_EXAMPLES=OFF \
+            -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run Tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Generate Coverage Report
+        run: |
+          chmod +x scripts/coverage_report.sh
+          ./scripts/coverage_report.sh build
+        env:
+          COVERAGE_THRESHOLD: 80
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-linux
+          path: build/coverage/
+          retention-days: 30
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: build/coverage.info
+          flags: linux
+          name: linux-coverage
+          fail_ci_if_error: false
+
+  coverage-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: '2024.01.12'
+
+      - name: Configure with Coverage
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DENABLE_COVERAGE=ON \
+            -DENABLE_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Run Tests
+        run: cd build && ctest --output-on-failure
+
+      - name: Generate Coverage Report
+        run: |
+          chmod +x scripts/coverage_report.sh
+          ./scripts/coverage_report.sh build
+        env:
+          COVERAGE_THRESHOLD: 80
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-macos
+          path: build/coverage/
+          retention-days: 30
+
+  coverage-badge:
+    runs-on: ubuntu-latest
+    needs: [coverage-linux]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Coverage Report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-report-linux
+          path: build/coverage/
+
+      - name: Extract Coverage Percentage
+        id: coverage
+        run: |
+          if [ -f build/coverage/index.html ]; then
+            # Try to extract coverage from the report
+            COVERAGE=$(lcov --summary build/coverage.info 2>&1 | grep "lines" | grep -oP '\d+\.\d+' | head -1 || echo "0")
+            echo "coverage=$COVERAGE" >> $GITHUB_OUTPUT
+            echo "Coverage: $COVERAGE%"
+          else
+            echo "coverage=0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Coverage Badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ secrets.GIST_ID }}
+          filename: coverage-badge.json
+          label: coverage
+          message: ${{ steps.coverage.outputs.coverage }}%
+          valColorRange: ${{ steps.coverage.outputs.coverage }}
+          maxColorRange: 100
+          minColorRange: 0
